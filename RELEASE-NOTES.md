@@ -15,6 +15,11 @@
 - The bandwidth for KDE plots is computed using a modified version of Scott's rule. The new version uses entropy instead of standard
 deviation. This works better for multimodal distributions. Functions using KDE plots has a new argument `bw` controlling the bandwidth.
 
+### Fixes
+
+- `VonMises` does not overflow for large values of kappa. i0 and i1 have been removed and we now use
+   log_i0 to compute the logp.
+
 ### Deprecations
 
 - DIC and BPIC calculations have been removed
