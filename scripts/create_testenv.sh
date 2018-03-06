@@ -53,6 +53,9 @@ pip install ipython ipywidgets
 # matplotlib is not required for the library, but is for tests
 pip install matplotlib
 
+# matplotlib is not required for the library, but is for tests
+pip install matplotlib
+
 if [ -z ${NO_SETUP} ]; then
     python setup.py build_ext --inplace
 fi
