@@ -1,42 +1,44 @@
 import subprocess
-import ipython1.kernel.api as kernel
-
+from IPython.kernel import client
+import os, time
+from pymc import Sampler
+import numpy as np
 """
-It seems to work, but the real challenge is to get the results back. 
+It seems to work, but the real challenge is to get the results back.
 One solution may be to create a parallel database backend. The backend
-is instantiated in Parallel, communicates with each process, and serves 
-as a middle man with the real backend. Each time the tally method is called, 
-it calls the real backend tally with the correct chain. This requires setting 
-an optional argument for tally to each backend. 
+is instantiated in Parallel, communicates with each process, and serves
+as a middle man with the real backend. Each time the tally method is called,
+it calls the real backend tally with the correct chain. This requires setting
+an optional argument for tally to each backend.
 def tally(self, index, chain=-1):
 
 The sample method is Parallel must initialize the chains
 """
 
 
-class Parallel:
+class Parallel(Sampler):
     """
     Parallel manages multiple MCMC loops. It is initialized with:
 
     A = Parallel(prob_def, dbase=None, chains=1, proc=1)
 
     Arguments
-    
-        prob_def: class, module or dictionary containing nodes and 
+
+        prob_def: class, module or dictionary containing nodes and
         StepMethods)
-        
-        dbase: Database backend used to tally the samples. 
+
+        dbase: Database backend used to tally the samples.
         Implemented backends: None, hdf5.
-        
-        proc: Number of processes (generally the number of available CPUs.)
-        
+
+        chains: Number of processes (generally the number of available CPUs.)
+
     Externally-accessible attributes:
 
         dtrms:          All extant Deterministics.
 
-        stochs:         All extant Stochastics with isdata = False.
+        stochs:         All extant Stochastics with observed = False.
 
-        data:               All extant Stochastics with isdata = True.
+        data:               All extant Stochastics with observed = True.
 
         nodes:               All extant Stochastics and Deterministics.
 
@@ -47,7 +49,7 @@ class Parallel:
         sample(iter,burn,thin): At each MCMC iteration, calls each step_method's step() method.
                                 Tallies Stochastics and Deterministics as appropriate.
 
-        trace(stoch, burn, thin, slice): Return the trace of stoch, 
+        trace(stoch, burn, thin, slice): Return the trace of stoch,
         sliced according to slice or burn and thin arguments.
 
         remember(trace_index): Return the entire model to the tallied state indexed by trace_index.
@@ -59,50 +61,84 @@ class Parallel:
 
     See also StepMethod, OneAtATimeMetropolis, Node, Stochastic, Deterministic, and weight.
     """
-    def __init__(self, input, dbase='ram', proc=2):
+    def __init__(self, input, db='ram', chains=2):
         try:
-            rc = kernel.RemoteController(('127.0.0.1',10105))
+            mec = client.MultiEngineClient()
         except:
             p = subprocess.Popen('ipcluster -n %d'%proc, shell=True)
             p.wait()
-            rc = kernel.RemoteController(('127.0.0.1',10105))
-        
+            mec = client.MultiEngineClient()
+
         # Check everything is alright.
-        nproc = len(rc.getIDs())
-        
+        nproc = len(mec.get_ids())
+        assert chains <= nproc
+
+
+        Sampler.__init__(self, input, db=db)
+
         # Import the individual models in each process
-        #rc.pushModule(input)
-        
+        #mec.pushModule(input)
+
+        proc = range(chains)
+
         try:
-            rc.executeAll('import %s as input'%input.__name__)
+            mec.execute('import %s as input'%input.__name__, proc)
         except:
-            rc.executeAll( 'import site' )
-            rc.executeAll( 'site.addsitedir( ' + `os.getcwd()` + ' )' )
-            rc.executeAll( 'import %s as input; reload(input)'%input.__name__)
-        
+            mec.execute( 'import site' , proc)
+            mec.execute( 'site.addsitedir( ' + `os.getcwd()` + ' )' , proc)
+            mec.execute( 'import %s as input; reload(input)'%input.__name__, proc)
+
         # Instantiate Sampler instances in each process
-        rc.executeAll('from pymc import Sampler')
-        rc.executeAll('from pymc.database.parallel import Database')
-        for i in range(nproc):
-            rc.execute(i, 'db = Database(%d)'%i)
-        rc.executeAll('S = Sampler(input, db=db)')
-        
-        self.rc = rc
-        
+        mec.execute('from pymc import MCMC', proc)
+        #mec.execute('from pymc.database.parallel import Database')
+        #for i in range(nproc):
+        #    mec.execute(i, 'db = Database(%d)'%i)
+        mec.execute("S = MCMC(input, db='txt')", proc)
+
+        self.mec = mec
+        self.proc = proc
+
     def sample(self, iter, burn=0, thin=1, tune_interval=100):
+        proc = self.proc
         # Set the random initial seeds
-        self.rc.executeAll('S.seed()')
-        
+        self.mec.execute('S.seed()', proc)
+        self.mec.execute('nugget = {}')
+        length = int(np.ceil((1.0*iter-burn)/thin))
+
+        for i in proc:
+            self.db._initialize(length=length)
+
         # Run the chains on each process
-        self.rc.executeAll('S.sample(%(iter)i, %(burn)i, %(thin)i, %(tune_interval)i'%vars())
-        
-        # Merge the traces
-         
-        
-    
+        self.result = self.mec.execute('S.sample(%(iter)i, %(burn)i, %(thin)i, %(tune_interval)i)'%vars(), proc, block=True)
+
+        self.mec.execute("print 'Sampling terminated successfully on process %d.'%id", proc)
+
+        # Launch a subprocess that will tally the traces of each sampler.
+        #self.tally()
+
+    def fetch_samples(self):
+        """Read in the traces dumped by the samplers."""
+        mec = self.mec
+        data = {}
+        for obj in self._variables_to_tally:
+            name = obj.__name__
+            print 'getting ', name
+            mec.execute('x = S.%s.trace(chain=-1)'%name, self.proc)
+            data[name] = mec.pull('x', self.proc)
+
+        for obj in self._variables_to_tally:
+            name = obj.__name__
+            traces = data[name]
+            for chain, trace in enumerate(traces):
+                for index, v in enumerate(trace):
+                    obj.value = v
+                    obj.trace.tally(index, chain)
+
+
+
 
 if __name__ == '__main__':
     from pymc.examples import DisasterModel
     P = Parallel(DisasterModel, 'ram')
     P.sample(1000,500,1)
-    #P.rc.killAll(controller=True)
+    #P.mec.killAll(controller=True)

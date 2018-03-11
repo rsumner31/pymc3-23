@@ -7,18 +7,18 @@
 ###
 # TODO
 # ----
-# Add test for dtrm
-# Check discrete and binary stochs
+# Add test for deterministic
+# Check discrete and binary stochastics
 # Test the distribution instantiators.
 ###
 
 from numpy.testing import *
-import PyMC2
-from PyMC2 import Sampler, data, stoch, dtrm, discrete_stoch, \
+import pymc
+from pymc import Sampler, data, stochastic, deterministic, \
     Stochastic,Deterministic
 from numpy import array, log, sum, ones, concatenate, inf
-from PyMC2 import uniform_like, exponential_like, poisson_like
-
+from pymc import uniform_like, exponential_like, poisson_like
+import warnings
 
 D_array =   array([ 4, 5, 4, 0, 1, 4, 3, 4, 0, 6, 3, 3, 4, 0, 2, 6,
                     3, 3, 5, 4, 5, 3, 1, 4, 4, 1, 5, 5, 3, 4, 2, 5,
@@ -28,24 +28,24 @@ D_array =   array([ 4, 5, 4, 0, 1, 4, 3, 4, 0, 6, 3, 3, 4, 0, 2, 6,
                     3, 3, 1, 1, 2, 1, 1, 1, 1, 2, 4, 2, 0, 0, 1, 4,
                     0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1])
 
-# Define data and stochs
+# Define data and stochastics
 
-@discrete_stoch
+@stochastic(dtype=int)
 def s(value=50, length=110):
-    """Change time for rate stoch."""
+    """Change time for rate stochastic."""
     return uniform_like(value, 0, length)
 
-@stoch
+@stochastic
 def e(value=1., rate=1.):
-    """Rate stoch of poisson distribution."""
+    """Rate stochastic of poisson distribution."""
     return exponential_like(value, rate)
 
-@stoch
+@stochastic
 def l(value=.1, rate = 1.):
-    """Rate stoch of poisson distribution."""
+    """Rate stochastic of poisson distribution."""
     return exponential_like(value, rate)
-        
-@data(discrete=True)
+
+@data(dtype=int)
 def D(  value = D_array,
         s = s,
         e = e,
@@ -62,28 +62,54 @@ def F(value = D_array*.5,
         l = l):
     """Annual occurences of coal mining disasters."""
     return poisson_like(value[:s],e) + poisson_like(value[s:],l)
-        
+
 @data
-@stoch
+@stochastic
 def G(value = D_array*.5,
         s = s,
         e = e,
         l = l):
     """Annual occurences of coal mining disasters."""
     return poisson_like(value[:s],e) + poisson_like(value[s:],l)
-        
-class test_instantiation(NumpyTestCase):
-    def check_data(self):
+
+class test_instantiation(TestCase):
+    def test_data(self):
         assert(isinstance(D, Stochastic))
-        assert(D.isdata)
+        assert(D.observed)
         assert(isinstance(E, Stochastic))
-        assert(E.isdata)
+        assert(E.observed)
         assert(isinstance(F, Stochastic))
-        assert(F.isdata)
+        assert(F.observed)
         assert(isinstance(G, Stochastic))
-        assert(G.isdata)
-    def check_stoch(self):
+        assert(G.observed)
+
+    def test_stochastic(self):
         assert(isinstance(l, Stochastic))
-        assert(not l.isdata)
+        assert(not l.observed)
+
+    def test_invalid_keyword(self): # Ticket 239
+        # Normal is given values instead of value and should raise an error
+        try:
+            pymc.Normal(name='alpha', values=D_array, mu=1, tau=1)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError, 'Instantiation should fail.'
+
+
+class test_out_of_bound_initialization(TestCase):
+
+    def test_simple(self):
+        """We create a variable whose initial value creates a ZeroProbability error in
+        its children, and check that robust_init can randomly sample the variable until
+        it finds a suitable value.
+        """
+        lower = pymc.Uniform('lower', 0., 2., value=1.5, rseed=True)
+        pymc.robust_init(pymc.Uniform, 100, 'data', lower=lower, upper=5, value=[1, 2, 3, 4], observed=True)
+
+
+
 if __name__ == '__main__':
-    NumpyTest().run()
+    #import unittest
+    #unittest.main()
+    run_module_suite()

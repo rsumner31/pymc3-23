@@ -5,17 +5,19 @@ c Author: Anand Patil, anand.prabhakar.patil@gmail.com
 cf2py double precision dimension(n), intent(copy) :: x
 cf2py double precision dimension(n), intent(copy) :: mu
 cf2py integer intent(hide),depend(x) :: n=len(x)
-cf2py double precision dimension(n,n), intent(copy) :: sig
+cf2py double precision dimension(n,n), intent(in) :: sig
 cf2py double precision intent(out) :: like
 cf2py integer intent(hide) :: info
+cf2py threadsafe
 
       DOUBLE PRECISION sig(n,n), x(n), mu(n), like
-      INTEGER n, info
+      INTEGER n, info, i
+      DOUBLE PRECISION twopi_N, log_detC, gd
       DOUBLE PRECISION infinity
       PARAMETER (infinity = 1.7976931348623157d308)      
       DOUBLE PRECISION PI
       PARAMETER (PI=3.141592653589793238462643d0) 
-      DOUBLE PRECISION twopi_N, log_detC
+
 
       EXTERNAL DPOTRS
 ! DPOTRS( UPLO, N, NRHS, A, LDA, B, LDB, INFO ) Solves triangular system
@@ -23,7 +25,8 @@ cf2py integer intent(hide) :: info
 ! DAXPY(N,DA,DX,INCX,DY,INCY) Adding vectors
       EXTERNAL DCOPY
 ! DCOPY(N,DX,INCX,DY,INCY) copies x to y
-      EXTERNAL DDOT
+! NB DDOT from ATLAS, compiled with gfortran 4.2 on Ubuntu Gutsy,
+! was producing bad output- hence the manual dot product.
       
 !     x <- (x-mu)      
       call DAXPY(n, -1.0D0, mu, 1, x, 1)
@@ -33,9 +36,14 @@ cf2py integer intent(hide) :: info
       
 !     x <- sig ^-1 * x
       call DPOTRS('L',n,1,sig,n,x,n,info)
+
+      gd=0.0D0
+      do i=1,n
+          gd=gd+x(i)*mu(i)
+      end do
       
 !     like <- .5 dot(x,mu) (.5 (x-mu) C^{-1} (x-mu)^T)
-      like = -0.5D0 * DDOT(n, x, 1, mu, 1)
+      like = -0.5D0 * gd
 !       print *, like
       
       twopi_N = 0.5D0 * N * dlog(2.0D0*PI)
@@ -61,6 +69,7 @@ cf2py integer intent(hide),depend(x) :: n=len(x)
 cf2py double precision dimension(n,n), intent(copy) :: C
 cf2py double precision intent(out) :: like
 cf2py integer intent(hide) :: info
+cf2py threadsafe
 
       DOUBLE PRECISION C(n,n), x(n), mu(n), like
       INTEGER n, info
@@ -68,21 +77,20 @@ cf2py integer intent(hide) :: info
       PARAMETER (infinity = 1.7976931348623157d308)      
       DOUBLE PRECISION PI
       PARAMETER (PI=3.141592653589793238462643d0) 
-      DOUBLE PRECISION twopi_N, log_detC
 
       EXTERNAL DPOTRF
 ! DPOTRF( UPLO, N, A, LDA, INFO ) Cholesky factorization
-      EXTERNAL DPOTRS
-! DPOTRS( UPLO, N, NRHS, A, LDA, B, LDB, INFO ) Solves triangular system
-      EXTERNAL DAXPY
-! DAXPY(N,DA,DX,INCX,DY,INCY) Adding vectors
-      EXTERNAL DCOPY
-! DCOPY(N,DX,INCX,DY,INCY) copies x to y
-      EXTERNAL DDOT
+
       
 !     C <- cholesky(C)      
       call DPOTRF( 'L', n, C, n, info )
 !       print *, C
+
+!      If cholesky failed, puke.
+       if (info .GT. 0) then
+         like = -infinity
+         RETURN
+       endif
       
 !     Call to chol_mvnorm
       call chol_mvnorm(x,mu,C,n,like,info)
@@ -97,9 +105,10 @@ cf2py double precision dimension(n), intent(copy) :: mu
 cf2py integer intent(hide),depend(x) :: n=len(x)
 cf2py double precision dimension(n,n), intent(copy) :: tau
 cf2py double precision intent(out) :: like
+cf2py threadsafe
 
-      DOUBLE PRECISION tau(n,n), x(n), mu(n), like
-      INTEGER n, info
+      DOUBLE PRECISION tau(n,n), x(n), mu(n), like, gd
+      INTEGER n, info, i
       DOUBLE PRECISION infinity
       PARAMETER (infinity = 1.7976931348623157d308)      
       DOUBLE PRECISION PI
@@ -114,7 +123,6 @@ cf2py double precision intent(out) :: like
 ! DAXPY(N,DA,DX,INCX,DY,INCY) Adding vectors
       EXTERNAL DCOPY
 ! DCOPY(N,DX,INCX,DY,INCY) copies x to y
-      EXTERNAL DDOT
 
       twopi_N = 0.5D0 * N * dlog(2.0D0*PI)
 
@@ -127,9 +135,13 @@ cf2py double precision intent(out) :: like
 !     mu <- tau * x
       call DSYMV('L',n,1.0D0,tau,n,x,1,0.0D0,mu,1)
 
+      gd = 0.0D0
+      do i=1,n
+          gd=gd+x(i)*mu(i)
+      end do
 
 !     like <- -.5 dot(x,mu) (.5 (x-mu) C^{-1} (x-mu)^T)
-      like = -0.5D0 * DDOT(n, x, 1, mu, 1)
+      like = -0.5D0 * gd
 
 !      Cholesky factorize tau for the determinant.      
        call DPOTRF( 'L', n, tau, n, info )
@@ -151,19 +163,22 @@ cf2py double precision intent(out) :: like
       return
       END
       
-      SUBROUTINE blas_wishart(X,k,n,V,like)
+      SUBROUTINE blas_wishart(X,k,n,T,like)
 
 c Wishart log-likelihood function.
 
-cf2py double precision dimension(k,k),intent(copy) :: X,V
+cf2py double precision dimension(k,k),intent(copy) :: X,T
 cf2py double precision intent(out) :: like
 cf2py integer intent(hide),depend(X) :: k=len(X)
+cf2py threadsafe
 
       INTEGER i,k,n
-      DOUBLE PRECISION X(k,k),V(k,k),bx(k,k)
+      DOUBLE PRECISION X(k,k),T(k,k),bx(k,k)
       DOUBLE PRECISION dx,db,tbx,a,g,like
       DOUBLE PRECISION infinity
       PARAMETER (infinity = 1.7976931348623157d308)
+      DOUBLE PRECISION PI
+      PARAMETER (PI=3.141592653589793238462643d0)      
 
       EXTERNAL DCOPY
 ! DCOPY(N,DX,INCX,DY,INCY) copies x to y      
@@ -172,37 +187,33 @@ cf2py integer intent(hide),depend(X) :: k=len(X)
       EXTERNAL DPOTRF
 ! DPOTRF( UPLO, N, A, LDA, INFO ) Cholesky factorization      
 
-      print *, 'Warning, vectorized Wisharts are untested'
-c determinants
-      call dtrm(X,k,dx) 
-      call dtrm(V,k,db)
+c trace of T*X
+!     bx <- T * X
+      call DSYMM('L','L',k,k,1.0D0,T,k,x,k,0.0D0,bx,k)
 
-c trace of V*X
-!     bx <- V * bx
-      call DSYMM('l','L',n,n,1.0D0,V,n,x,n,0.0D0,bx)
-
-c Cholesky factor V, puke if not pos def.
-      call DPOTRF( 'L', n, V, n, info )
+c Cholesky factor T, puke if not pos def.
+      call DPOTRF( 'L', k, T, k, info )
       if (info .GT. 0) then
         like = -infinity
         RETURN
       endif 
+      
 c Cholesky factor X, puke if not pos def.
-      call DPOTRF( 'L', n, X, n, info )
+      call DPOTRF( 'L', k, X, k, info )
       if (info .GT. 0) then
         like = -infinity
         RETURN
       endif 
-
+      
 c Get the trace and log-sqrt-determinants
       tbx = 0.0D0
       dx = 0.0D0
       db = 0.0D0      
       
-      do i=1,n
+      do i=1,k
         tbx = tbx + bx(i,i)
         dx = dx + dlog(X(i,i))
-        dx = dx + dlog(V(i,i))
+        db = db + dlog(T(i,i))
       enddo
             
       if (k .GT. n) then
@@ -210,17 +221,20 @@ c Get the trace and log-sqrt-determinants
         RETURN
       endif
       
+      like = 0.0D0
       like = (n - k - 1) * dx
       like = like + n * db
-      like = like - 0.5 * tbx
-      like = like - (n*k/2.0)*dlog(2.0d0)
+      like = like - 0.5D0 * tbx
+      like = like - (n*k/2.0d0)*dlog(2.0d0)
 
       do i=1,k
-        a = (n - i + 1)/2.0
+        a = (n - i + 1)/2.0D0
         call gamfun(a, g)
         like = like - g
       enddo
-
+      
+      like = like - k * (k-1) * 0.25D0 * dlog(PI)
+! 
       return
       END
 
@@ -234,12 +248,15 @@ c Doesn't vectorize the determinants, just the matrix multiplication.
 cf2py double precision dimension(k,k),intent(copy) :: V,X
 cf2py double precision intent(out) :: like
 cf2py integer intent(hide),depend(X) :: k=len(X)
+cf2py threadsafe
 
       INTEGER i,k,info, n
       DOUBLE PRECISION X(k,k),V(k,k),bx(k,k)
       DOUBLE PRECISION dx,db,tbx,a,g,like
       DOUBLE PRECISION infinity
       PARAMETER (infinity = 1.7976931348623157d308)
+      DOUBLE PRECISION PI
+      PARAMETER (PI=3.141592653589793238462643d0)      
 c
       EXTERNAL DCOPY
 ! DCOPY(N,DX,INCX,DY,INCY) copies x to y      
@@ -247,31 +264,31 @@ c
 ! DPOTRF( UPLO, N, A, LDA, INFO ) Cholesky factorization
       EXTERNAL DPOTRS
 ! DPOTRS( UPLO, N, NRHS, A, LDA, B, LDB, INFO ) Solves triangular system
-      print *, 'Warning, vectorized Wisharts are untested'
+
 c determinants
       
 c Cholesky factorize sigma, puke if not pos def
 !     V <- cholesky(V)      
-      call DPOTRF( 'L', n, V, n, info )
+      call DPOTRF( 'L', k, V, k, info )
       if (info .GT. 0) then
         like = -infinity
         RETURN
       endif
       
-c trace of sigma*X
+c trace of V^{-1}*X
 !     bx <- X
-      call DCOPY(n * n,X,1,bx,1)
-!     bx <- sigma * bx
-      call DPOTRS('L',n,n,V,n,bx,n,info)
+      call DCOPY(k * k,X,1,bx,1)
+!     bx <- V^{-1} * bx
+      call DPOTRS('L',k,k,V,k,bx,k,info)
 
 !     X <- cholesky(X)
-      call DPOTRF( 'L', n, X, n, info )
+      call DPOTRF( 'L', k, X, k, info )
 
 ! sqrt-log-determinant of sigma and X, and trace
       db=0.0D0
       dx=0.0D0
       tbx = 0.0D0
-      do i=1,n
+      do i=1,k
         db = db + dlog(V(i,i))
         dx = dx + dlog(X(i,i))        
         tbx = tbx + bx(i,i)
@@ -282,30 +299,106 @@ c trace of sigma*X
         RETURN
       endif
       
+      
       like = (n - k - 1) * dx
-      like = like + n * db
-      like = like - 0.5*tbx
-      like = like - (n*k/2.0)*dlog(2.0d0)
+      like = like - n * db
+      like = like - 0.5D0*tbx
+      like = like - (n*k/2.0D0)*dlog(2.0d0)
 
       do i=1,k
-        a = (n - i + 1)/2.0
+        a = (n - i + 1)/2.0D0
         call gamfun(a, g)
-        like = like - dlog(g)
+        like = like - g
       enddo
+
+      like = like - k * (k-1) * 0.25D0 * dlog(PI)
 
       return
       END
       
+      
+      SUBROUTINE blas_inv_wishart(X,k,n,T,like)
 
-      SUBROUTINE dtrsm_wrap(M,N,A,B,UPLO,TRANSA,ALPHA)
-cf2py double precision intent(inplace), dimension(m,n)::B
-cf2py double precision intent(in), dimension(m,m)::A
-cf2py optional character intent(in)::uplo='U'
-cf2py optional character intent(in)::transa='N'
-cf2py optional double precision intent(in)::alpha=1.0
-cf2py integer intent(hide), depend(A)::M=shape(A,0)
-cf2py integer intent(hide), depend(B)::N=shape(B,1)
+c Inverse Wishart log-likelihood function.
 
+cf2py double precision dimension(k,k),intent(copy) :: X,T
+cf2py double precision intent(out) :: like
+cf2py integer intent(hide),depend(X) :: k=len(X)
+cf2py threadsafe
+
+      INTEGER i,k,n
+      DOUBLE PRECISION X(k,k),T(k,k),TX(k,k)
+      DOUBLE PRECISION dx,db,tbx,a,g,like
+      DOUBLE PRECISION infinity
+      PARAMETER (infinity = 1.7976931348623157d308)
+      DOUBLE PRECISION PI
+      PARAMETER (PI=3.141592653589793238462643d0)      
+
+      EXTERNAL DCOPY
+! DCOPY(N,DX,INCX,DY,INCY) copies x to y      
+      EXTERNAL DPOTRF
+! DPOTRF( UPLO, N, A, LDA, INFO ) Cholesky factorization     
+      EXTERNAL DTRMM
+! DTRMM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB) B := alpha*B*op( A )
+
+c trace of T*X^{-1}
+!     TX <- T
+      call DCOPY(k*k,T,1,TX,1)
+!     TX <- T * X^{-1}
+      call DTRMM('R','L','T','N',k,k,1.0D0,X,k,TX,k)
+
+c Cholesky factor T, puke if not pos def.
+      call DPOTRF( 'L', k, T, k, info )
+      if (info .GT. 0) then
+        like = -infinity
+        RETURN
+      endif 
+      
+c Cholesky factor X, puke if not pos def.
+      call DPOTRF( 'L', k, X, k, info )
+      if (info .GT. 0) then
+        like = -infinity
+        RETURN
+      endif 
+      
+c Get the trace and log-sqrt-determinants
+      tbx = 0.0D0
+      dx = 0.0D0
+      db = 0.0D0      
+      
+      do i=1,k
+        tbx = tbx + TX(i,i)
+        dx = dx + dlog(X(i,i))
+        db = db + dlog(T(i,i))
+      enddo
+            
+      if (k .GT. n) then
+        like = -infinity
+        RETURN
+      endif
+      
+      like = -1.0D0*(n + k + 1) * dx
+      like = like + n * db
+      like = like - 0.5D0 * tbx
+      like = like - (n*k/2.0d0)*dlog(2.0d0)
+
+      do i=1,k
+        a = (n - i + 1)/2.0D0
+        call gamfun(a, g)
+        like = like - g
+      enddo
+      
+      like = like - k * (k-1) * 0.25D0 * dlog(PI)
+! 
+      return
+      END
+      
+
+      SUBROUTINE dtrsm_wrap(M,N,A,B,SIDE,TRANSA,UPLO)
+cf2py intent(inplace)::B
+cf2py integer intent(hide)::M
+cf2py integer intent(hide)::N
+cf2py threadsafe
 
       
 *     .. Scalar Arguments ..
@@ -323,10 +416,40 @@ cf2py integer intent(hide), depend(B)::N=shape(B,1)
       DIAG = 'N'
       LDA = M
       LDB = M
-      SIDE = 'L'
+      ALPHA=1.0D0
 
       
       CALL DTRSM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
+      RETURN
+      END
+
+
+      SUBROUTINE dtrmm_wrap(M,N,A,B,SIDE,TRANSA,UPLO)
+cf2py intent(inplace)::B
+cf2py integer intent(hide)::M
+cf2py integer intent(hide)::N
+cf2py threadsafe
+
+      
+*     .. Scalar Arguments ..
+      DOUBLE PRECISION ALPHA
+      INTEGER LDA,LDB,M,N
+      CHARACTER DIAG,SIDE,TRANSA,UPLO
+*     ..
+*     .. Array Arguments ..
+      DOUBLE PRECISION A(M,M),B(M,N)
+      
+      EXTERNAL DTRMM
+! DTRMM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
+*     X = alpha*op( A )*B,   or   X = alpha*B*op( A ),
+      
+      DIAG = 'N'
+      LDA = M
+      LDB = M
+      ALPHA=1.0D0
+
+      
+      CALL DTRMM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
       RETURN
       END
 
@@ -337,6 +460,7 @@ cf2py intent(hide) p
 cf2py intent(hide) work       
 cf2py intent(out) piv
 cf2py intent(out) info
+cf2py threadsafe
 
       integer lda,p,piv(p),job,info
       double precision a(p,p),work(p)      
@@ -601,6 +725,7 @@ cf2py integer depend(b), intent(hide)::m=shape(b,1)
 cf2py optional character intent(in):: uplo='U'
 cf2py integer intent(out)::info
 cf2py double precision intent(inplace), dimension(n,m)::b
+cf2py threadsafe
 
       DOUBLE PRECISION chol_fac(n,n), b(n,m)
       INTEGER n, info,m
@@ -613,38 +738,4 @@ cf2py double precision intent(inplace), dimension(n,m)::b
       call DPOTRS(uplo,n,m,chol_fac,n,b,n,info)
       
       return
-      END
-      
-
-
-      SUBROUTINE dtrmm_wrap(M,N,A,B,UPLO,TRANSA)
-cf2py double precision intent(inplace), dimension(m,n)::B
-cf2py double precision intent(in), dimension(m,m)::A
-cf2py optional character intent(in)::uplo='U'
-cf2py optional character intent(in)::transa='N'
-cf2py integer intent(hide), depend(A)::M=shape(A,0)
-cf2py integer intent(hide), depend(B)::N=shape(B,1)
-
-
-      
-*     .. Scalar Arguments ..
-      DOUBLE PRECISION ALPHA
-      INTEGER LDA,LDB,M,N
-      CHARACTER DIAG,SIDE,TRANSA,UPLO
-*     ..
-*     .. Array Arguments ..
-      DOUBLE PRECISION A(M,M),B(M,N)
-      
-      EXTERNAL DTRMM
-! DTRMM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
-*     alpha*op( A )*X or alpha*X*op(A)
-      
-      DIAG = 'N'
-      LDA = M
-      LDB = M
-      SIDE = 'L'
-      ALPHA=1.0D0
-      
-      CALL DTRMM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
-      RETURN
       END

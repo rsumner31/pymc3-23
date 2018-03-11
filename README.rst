@@ -1,166 +1,151 @@
-PyMC3
-=====
+************
+Introduction
+************
 
-|Gitter| |Build Status| |Coverage|
+:Date: April 6, 2007
+:Authors: Chris Fonnesbeck, Anand Patil, David Huard
+:Contact: pymc@googlegroups.com
+:Web site: http://code.google.com/p/pymc/
+:Copyright: This document has been placed in the public domain.
+:License: PyMC is released under the MIT license.
+:Version: 2.0
 
-PyMC3 is a python module for Bayesian statistical modeling and model
-fitting which focuses on advanced Markov chain Monte Carlo fitting
-algorithms. Its flexibility and extensibility make it applicable to a
-large suite of problems.
 
-Check out the `getting started
-guide <http://pymc-devs.github.io/pymc3/notebooks/getting_started.html>`__!
+Purpose
+=======
+
+PyMC is a python module that implements Bayesian statistical models and
+fitting algorithms, including Markov chain Monte Carlo.
+Its flexibility makes it applicable to a large suite of problems as well as
+easily extensible. Along with core sampling functionality, PyMC includes
+methods for summarizing output, plotting, goodness-of-fit and convergence
+diagnostics.
+
 
 Features
---------
+========
 
--  Intuitive model specification syntax, for example, ``x ~ N(0,1)``
-   translates to ``x = Normal(0,1)``
--  **Powerful sampling algorithms**, such as the `No U-Turn
-   Sampler <http://arxiv.org/abs/1111.4246>`__, allow complex models
-   with thousands of parameters with little specialized knowledge of
-   fitting algorithms.
--  **Variational inference**: `ADVI <http://arxiv.org/abs/1506.03431>`__
-   for fast approximate posterior estimation as well as mini-batch ADVI
-   for large data sets.
--  Easy optimization for finding the *maximum a posteriori* (MAP) point
--  `Theano <http://deeplearning.net/software/theano/>`__ features
--  Numpy broadcasting and advanced indexing
--  Linear algebra operators
--  Computation optimization and dynamic C compilation
--  Simple extensibility
--  Transparent support for missing value imputation
+* Fits Bayesian statistical models you create with Markov chain Monte Carlo and
+  other algorithms.
+
+* Large suite of well-documented statistical distributions.
+
+* Uses NumPy for numerics wherever possible.
+
+* Gaussian processes.
+
+* Sampling loops can be paused and tuned manually, or saved and restarted later.
+
+* Creates summaries including tables and plots.
+
+* Traces can be saved to the disk as plain text, Python pickles, SQLite or MySQL
+  database, or hdf5 archives.
+
+* Convergence diagnostics.
+
+* Extensible: easily incorporates custom step methods and unusual probability
+  distributions.
+
+* MCMC loops can be embedded in larger programs, and results can be analyzed
+  with the full power of Python.
+
+
+What's new in 2.0
+=================
+
+* New flexible object model and syntax (not backward-compatible).
+
+* Reduced redundant computations: only relevant log-probability terms are
+  computed, and these are cached.
+
+* Optimized probability distributions.
+
+* New adaptive blocked Metropolis step method.
+
+* Much more!
+
+
+Usage
+=====
+
+First, define your model in a file, say mymodel.py (with comments, of course!)::
+
+   # Import relevant modules
+   import pymc
+   import numpy as np
+
+   # Some data
+   n = 5*np.ones(4,dtype=int)
+   x = np.array([-.86,-.3,-.05,.73])
+
+   # Priors on unknown parameters
+   alpha = pymc.Normal('alpha',mu=0,tau=.01)
+   beta = pymc.Normal('beta',mu=0,tau=.01)
+
+   # Arbitrary deterministic function of parameters
+   @pymc.deterministic
+   def theta(a=alpha, b=beta):
+       """theta = logit^{-1}(a+b)"""
+       return pymc.invlogit(a+b*x)
+
+   # Binomial likelihood for data
+   d = pymc.Binomial('d', n=n, p=theta, value=np.array([0.,1.,3.,5.]),
+                     \observed=True)
+
+Save this file, then from a python shell (or another filein the same directory), call::
+
+	import pymc
+	import mymodel
+
+	S = pymc.MCMC(mymodel, db='pickle')
+	S.sample(iter=10000, burn=5000, thin=2)
+	pymc.Matplot.plot(S)
+
+This will generate 10000 posterior samples, thinned by a factor of 2, with the first half discarded as burn-in. The sample is stored in a Python serialization (pickle) database.
+
+
+History
+=======
+
+PyMC began development in 2003, as an effort to generalize the process of building Metropolis-Hastings samplers, with an aim to making Markov chain Monte Carlo (MCMC) more accessible to non-statisticians (particularly ecologists). The choice to develop PyMC as a python module, rather than a standalone application, allowed the use MCMC methods in a larger modeling framework. By 2005, PyMC was reliable enough for version 1.0 to be released to the public. A small group of regular users, most associated with the University of Georgia, provided much of the feedback necessary for the refinement of PyMC to a usable state.
+
+In 2006, David Huard and Anand Patil joined Chris Fonnesbeck on the development team for PyMC 2.0. This iteration of the software strives for more flexibility, better performance and a better end-user experience than any previous version of PyMC.
+
+
+Relationship to other packages
+==============================
+
+PyMC in one of many general-purpose MCMC packages. The most prominent among them is `WinBUGS`_, which has made MCMC and with it Bayesian statistics accessible to a huge user community. Unlike PyMC, WinBUGS is a stand-alone, self-contained application. This can be an attractive feature for users without much programming experience, but others may find it constraining. A related package is `JAGS`_, which provides a more UNIX-like implementation of the BUGS language. Other packages include `Bassist`_, `Hierarchical Bayes Compiler`_ and a number of `R packages`_ of varying scope.
+
+It would be difficult to meaningfully benchmark PyMC against these other packages because of the unlimited variety in Bayesian probability models and flavors of the MCMC algorithm. However, it is possible to anticipate how it will perform in broad terms. 
+
+PyMC's number-crunching is done using a combination of industry-standard libraries (NumPy and the linear algebra libraries on which it depends) and hand-optimized Fortran routines. For models that are composed of variables valued as large arrays, PyMC will spend most of its time in these fast routines. In that case, it will be at least as fast as packages written entirely in C and significantly faster than WinBUGS. For finer-grained models containing mostly scalar variables, it will spend most of its time in coordinating Python code. In that case, despite our best efforts at optimization, PyMC will be significantly slower than packages written in C and on par with or slower than WinBUGS. However, as fine-grained models are often small and simple, the total time required for sampling is often quite reasonable despite this poorer performance.
+
+
+We have chosen to spend time developing PyMC rather than using an existing package primarily because it allows us to build and efficiently fit any model we like within a full-fledged Python environment. We have emphasized extensibility throughout PyMC's design, so if it doesn't meet your needs out of the box chances are you can make it do so with a relatively small amount of code. See the `testimonials`_ page on the wiki for reasons why other users have chosen PyMC.
+
 
 Getting started
----------------
+===============
 
--  The `PyMC3
-   tutorial <http://pymc-devs.github.io/pymc3/notebooks/getting_started.html>`__ or
-   `journal publication <https://peerj.com/articles/cs-55/>`__
--  `PyMC3 examples <http://pymc-devs.github.io/pymc3/examples.html>`__
-   and the `API reference <http://pymc-devs.github.io/pymc3/api.html>`__
--  `Bayesian Modelling in Python -- tutorials on Bayesian statistics and
-   PyMC3 as Jupyter Notebooks by Mark
-   Dregan <https://github.com/markdregan/Bayesian-Modelling-in-Python>`__
--  `Talk at PyData London 2016 on
-   PyMC3 <https://www.youtube.com/watch?v=LlzVlqVzeD8>`__
--  `PyMC3 port of the models presented in the book "Doing Bayesian Data
-   Analysis" by John
-   Kruschke <https://github.com/aloctavodia/Doing_bayesian_data_analysis>`__
--  Coal Mining Disasters model in `PyMC
-   2 <https://github.com/pymc-devs/pymc/blob/master/pymc/examples/disaster_model.py>`__
-   and `PyMC
-   3 <https://github.com/pymc-devs/pymc3/blob/master/pymc3/examples/disaster_model.py>`__
+This user guide provides all the information needed to install PyMC, code
+a Bayesian statistical model, run the sampler, save and analyze the results.
+In addition, it contains the list of the
+available statistical distributions. More `examples`_ of usage as well as
+`tutorials`_  are available from the PyMC web site.
 
-Installation
-------------
+.. _`examples`: http://code.google.com/p/pymc/
 
-The latest release of PyMC3 can be installed from PyPI using ``pip``:
+.. _`tutorials`: http://code.google.com/p/pymc/wiki/TutorialsAndRecipes
 
-::
+.. _`WinBUGS`: http://www.mrc-bsu.cam.ac.uk/bugs/
 
-    pip install pymc3
+.. _`JAGS`: http://www-ice.iarc.fr/~martyn/software/jags/
 
-**Note:** Running ``pip install pymc`` will install PyMC 2.3, not PyMC3,
-from PyPI.
+.. _`Hierarchical Bayes Compiler`: http://www.cs.utah.edu/~hal/HBC/
 
-The current development branch of PyMC3 can be installed from GitHub, also using ``pip``:
+.. _`Bassist`: http://www.cs.helsinki.fi/research/fdk/bassist/
 
-::
+.. _`R packages`: http://cran.r-project.org/web/packages/
 
-    pip install git+https://github.com/pymc-devs/pymc3
-
-To ensure the development branch of Theano is installed alongside PyMC3
-(recommended), you can install PyMC3 using the ``requirements.txt``
-file. This requires cloning the repository to your computer:
-
-::
-
-    git clone https://github.com/pymc-devs/pymc3
-    cd pymc3
-    pip install -r requirements.txt
-
-However, if a recent version of Theano has already been installed on
-your system, you can install PyMC3 directly from GitHub.
-
-Another option is to clone the repository and install PyMC3 using
-``python setup.py install`` or ``python setup.py develop``.
-
-
-Dependencies
-------------
-
-PyMC3 is tested on Python 2.7 and 3.4 and depends on Theano, NumPy,
-SciPy, Pandas, and Matplotlib (see ``requirements.txt`` for version
-information).
-
-Optional
-~~~~~~~~
-
-In addtion to the above dependencies, the GLM submodule relies on
-``Patsy``\ [http://patsy.readthedocs.io/en/latest/].
-
-```scikits.sparse`` <https://github.com/njsmith/scikits-sparse>`__
-enables sparse scaling matrices which are useful for large problems.
-Installation on Ubuntu is easy:
-
-::
-
-    sudo apt-get install libsuitesparse-dev
-    pip install git+https://github.com/njsmith/scikits-sparse.git
-
-On Mac OS X you can install libsuitesparse 4.2.1 via homebrew (see
-http://brew.sh/ to install homebrew), manually add a link so the include
-files are where scikits-sparse expects them, and then install
-scikits-sparse:
-
-::
-
-    brew install suite-sparse
-    ln -s /usr/local/Cellar/suite-sparse/4.2.1/include/ /usr/local/include/suitesparse
-    pip install git+https://github.com/njsmith/scikits-sparse.git
-
-
-Citing PyMC3
-------------
-
-Salvatier J, Wiecki TV, Fonnesbeck C. (2016) Probabilistic programming
-in Python using PyMC3. PeerJ Computer Science 2:e55
-https://doi.org/10.7717/peerj-cs.55
-
-Coyle P. (2016) Probabilistic programming
-and PyMC3. European Scientific Python Conference 2015 (Cambridge, UK)
-http://adsabs.harvard.edu/abs/2016arXiv160700379C
-
-License
--------
-
-`Apache License, Version
-2.0 <https://github.com/pymc-devs/pymc3/blob/master/LICENSE>`__
-
-
-Contributors
-------------
-
-See the `GitHub contributor
-page <https://github.com/pymc-devs/pymc3/graphs/contributors>`__
-
-Sponsors
---------
-
-|NumFOCUS|
-
-|Quantopian|
-
-.. |Gitter| image:: https://badges.gitter.im/Join%20Chat.svg
-   :target: https://gitter.im/pymc-devs/pymc?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge
-.. |Build Status| image:: https://travis-ci.org/pymc-devs/pymc3.png?branch=master
-   :target: https://travis-ci.org/pymc-devs/pymc3
-.. |Coverage| image:: https://coveralls.io/repos/github/pymc-devs/pymc3/badge.svg?branch=master
-   :target: https://coveralls.io/github/pymc-devs/pymc3?branch=master 
-.. |NumFOCUS| image:: http://www.numfocus.org/uploads/6/0/6/9/60696727/1457562110.png
-   :target: http://www.numfocus.org/
-.. |Quantopian| image:: docs/quantopianlogo.jpg
-   :target: https://quantopian.com
-
-
+.. _`testimonials`: http://code.google.com/p/pymc/wiki/Testimonials

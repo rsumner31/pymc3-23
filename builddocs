@@ -1,17 +1,52 @@
 #!/usr/bin/env bash
-#epydoc --verbose --debug --config epydoc.conf
+# To run the following correctly, you will need a patched version of docutils to enable support for
+# math directives.
+# There is a dummy module in docs named distributions.py that imports all the PyMC likelihoods.
+# By introspection, epydoc finds the related docstrings and creates a tex output. This way,
+# we avoid documenting all the stuff that lives in the real pymc.distributions.py
+
+# epydoc --verbose --debug --config epydoc.conf
 
 
 # Make manual
 cd docs
-rst2latex.py ../README.txt | ./extract.py -s \\\\setlength{\\\\locallinewidth}{\\\\linewidth} -e \\hypertarget{installation}{} -o README.tex
-rst2latex.py ../INSTALL.txt | ./extract.py -s \\\\setlength{\\\\locallinewidth}{\\\\linewidth} -e \\end{document} -o INSTALL.tex
-rst2latex.py ../PyMC/database/README.txt | ./extract.py -s \\\\setlength{\\\\locallinewidth}{\\\\linewidth} -e \\end{document} -o database.tex
+
+#cat distributions-module.tex | ./extract.py -s '\\subsection\{Functions\}' -o distributions-module.text
+#sed -i -e 's/0\.5\\fboxrule/1pt/g' distributions-module.tex
+
+python rst2latex.py ../README.rst --use-latex-toc | ./extract.py -s '\\setlength\{\\locallinewidth\}\{\\linewidth\}' -e  '\\end\{document\}' -o README.tex
+python rst2latex.py ../INSTALL.rst --use-latex-toc | ./extract.py -s '\\setlength\{\\locallinewidth\}\{\\linewidth\}' -e '\\end\{document\}' -o INSTALL.tex
+#python rst2latex.py ../pymc/database/README.t --use-latex-toc | ./extract.py -s '\\setlength\{\\locallinewidth\}\{\\linewidth\}' -e '\\end\{document\}' -o database.tex
 
 mkdir pdf
-pdflatex -output-directory=pdf guide2.0
-bibtex pdf/guide2.0
-pdflatex -output-directory=pdf guide2.0
-pdflatex -output-directory=pdf guide2.0
-cd ..
+# User Guide
+pdflatex -output-directory=pdf -interaction batchmode UserGuide
+bibtex pdf/UserGuide
+pdflatex -output-directory=pdf -interaction batchmode UserGuide
+pdflatex -output-directory=pdf -interaction batchmode UserGuide
+cp pdf/UserGuide.pdf .
 
+
+# JSS
+cp pymc.bib jss/
+python manual2article.py README.tex > jss/README.tex
+python manual2article.py INSTALL.tex > jss/INSTALL.tex
+python manual2article.py tutorial.tex > jss/tutorial.tex
+python manual2article.py modelbuilding.tex > jss/modelbuilding.tex
+python manual2article.py modelchecking.tex > jss/modelchecking.tex
+python manual2article.py modelfitting.tex > jss/modelfitting.tex
+python manual2article.py extending.tex > jss/extending.tex
+python manual2article.py database.tex > jss/database.tex
+python manual2article.py conclusion.tex > jss/conclusion.tex
+python manual2article.py theory.tex > jss/theory.tex
+python manual2article.py distributions-module.tex >  jss/distributions-module.tex
+
+cd jss
+mkdir pdf
+pdflatex -output-directory=pdf -interaction batchmode jss_article
+bibtex pdf/jss_article
+pdflatex -output-directory=pdf -interaction batchmode jss_article
+pdflatex -output-directory=pdf -interaction batchmode jss_article
+cp pdf/jss_article.pdf .
+
+cd ../../

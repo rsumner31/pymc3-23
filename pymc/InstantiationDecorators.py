@@ -1,45 +1,57 @@
-import sys, inspect
+"""
+The decorators stochastic, deterministic, discrete_stochastic, binary_stochastic, potential and data
+are defined here, but the actual objects are defined in PyMCObjects.py
+"""
+
+__all__ = ['stochastic', 'stoch', 'deterministic', 'dtrm', 'potential', 'pot', 'data', 'observed', 'robust_init']
+
+import sys, inspect, pdb
 from imp import load_dynamic
-from PyMCObjects import Stochastic, Deterministic, DiscreteStochastic, BinaryStochastic, Potential
-from Node import ZeroProbability, ContainerBase, Node
+from PyMCObjects import Stochastic, Deterministic, Potential
+from Node import ZeroProbability, ContainerBase, Node, StochasticMeta
 from Container import Container
 import numpy as np
 
-def _extract(__func__, kwds, keys, classname): 
+def _extract(__func__, kwds, keys, classname, probe=True):
     """
-    Used by decorators stoch and dtrm to inspect declarations
+    Used by decorators stochastic and deterministic to inspect declarations
     """
-    
+
     # Add docs and name
-    kwds.update({'doc':__func__.__doc__, 'name':__func__.__name__})
-    
+    kwds['doc'] = __func__.__doc__
+    if not kwds.has_key('name'):
+        kwds['name'] = __func__.__name__
+    # kwds.update({'doc':__func__.__doc__, 'name':__func__.__name__})
+
     # Instanitate dictionary of parents
     parents = {}
-    
-    # Define global tracing function (I assume this is for debugging??)
-    # No, it's to get out the logp and random functions, if they're in there.
-    def probeFunc(frame, event, arg):
-        if event == 'return':
-            locals = frame.f_locals
-            kwds.update(dict((k,locals.get(k)) for k in keys))
-            sys.settrace(None)
-        return probeFunc
 
-    sys.settrace(probeFunc)
-    
-    # Get the functions logp and random (complete interface).
-    try:
-        __func__()
-    except:
-        if 'logp' in keys:  
-            kwds['logp']=__func__
-        else:
-            kwds['eval'] =__func__
+    # This gets used by stochastic to check for long-format logp and random:
+    if probe:
+        # Define global tracing function (I assume this is for debugging??)
+        # No, it's to get out the logp and random functions, if they're in there.
+        def probeFunc(frame, event, arg):
+            if event == 'return':
+                locals = frame.f_locals
+                kwds.update(dict((k,locals.get(k)) for k in keys))
+                sys.settrace(None)
+            return probeFunc
+
+        sys.settrace(probeFunc)
+
+        # Get the functions logp and random (complete interface).
+        try:
+            __func__()
+        except:
+            if 'logp' in keys:
+                kwds['logp']=__func__
+            else:
+                kwds['eval'] =__func__
 
     for key in keys:
         if not kwds.has_key(key):
-            kwds[key] = None            
-            
+            kwds[key] = None
+
     for key in ['logp', 'eval']:
         if key in keys:
             if kwds[key] is None:
@@ -47,10 +59,10 @@ def _extract(__func__, kwds, keys, classname):
 
     # Build parents dictionary by parsing the __func__tion's arguments.
     (args, varargs, varkw, defaults) = inspect.getargspec(__func__)
-    
+
     if defaults is None:
         defaults = ()
-    
+
     # Make sure all parents were defined
     arg_deficit = (len(args) - ('value' in args)) - len(defaults)
     if arg_deficit > 0:
@@ -60,107 +72,80 @@ def _extract(__func__, kwds, keys, classname):
             if i < arg_deficit-1:
                 err_str += ','
         raise ValueError, err_str
-    
+
     # Fill in parent dictionary
     try:
-        parents.update(dict(zip(args[-len(defaults):], defaults)))    
-    except TypeError: 
+        parents.update(dict(zip(args[-len(defaults):], defaults)))
+    except TypeError:
         pass
-        
+
     if parents.has_key('value'):
         value = parents.pop('value')
     else:
         value = None
-                    
+
     return (value, parents)
 
 def stochastic(__func__=None, __class__=Stochastic, binary=False, discrete=False, **kwds):
     """
     Decorator function for instantiating stochastic variables. Usages:
-    
+
     Medium:
-    
-        @stoch
+
+        @stochastic
         def A(value = ., parent_name = .,  ...):
             return foo(value, parent_name, ...)
-        
-        @stoch(trace=trace_object)
+
+        @stochastic(trace=trace_object)
         def A(value = ., parent_name = .,  ...):
             return foo(value, parent_name, ...)
-            
+
     Long:
 
-        @stoch
+        @stochastic
         def A(value = ., parent_name = .,  ...):
-            
+
             def logp(value, parent_name, ...):
                 return foo(value, parent_name, ...)
-                
+
             def random(parent_name, ...):
                 return bar(parent_name, ...)
-                
-    
-        @stoch(trace=trace_object)
+
+
+        @stochastic(trace=trace_object)
         def A(value = ., parent_name = .,  ...):
-            
+
             def logp(value, parent_name, ...):
                 return foo(value, parent_name, ...)
-                
+
             def random(parent_name, ...):
                 return bar(parent_name, ...)
-                
+
     where foo() computes the log-probability of the variable A
     conditional on its value and its parents' values, and bar()
     generates a random value from A's distribution conditional on
     its parents' values.
-    
-    :SeeAlso: Stochastic, Deterministic, dtrm, data, Potential, potential, Model, Container
+
+    :SeeAlso:
+      Stochastic, Deterministic, deterministic, data, Potential, potential, Model,
+      distributions
     """
-    
-    if binary:
-        __class__ = BinaryStochastic
-    elif discrete:
-        __class__ = DiscreteStochastic
-    
+
     def instantiate_p(__func__):
         value, parents = _extract(__func__, kwds, keys, 'Stochastic')
-        return __class__(value=value, parents=parents, **kwds)  
-            
+        return __class__(value=value, parents=parents, **kwds)
+
     keys = ['logp','random','rseed']
-    
+
     instantiate_p.kwds = kwds
-    
+
     if __func__:
         return instantiate_p(__func__)
-        
+
     return instantiate_p
-    
+
 # Shortcut alias
 stoch = stochastic
-    
-def discrete_stochastic(__func__=None, **kwds):
-    """
-    Instantiates a DiscreteStochastic instance, which takes only
-    integer values.
-    
-    Same usage as stoch.
-    """
-    return stoch(__func__=__func__, __class__ = DiscreteStochastic, **kwds)
-    
-# Shortcut alias
-discrete_stoch = discrete_stochastic
-    
-def binary_stochastic(__func__=None, **kwds):
-    """
-    Instantiates a BinaryStochastic instance, which takes only boolean
-    values.
-    
-    Same usage as stoch.
-    """
-    return stoch(__func__=__func__, __class__ = BinaryStochastic, **kwds)
-    
-# Shortcut alias
-binary_stoch = binary_stochastic
 
 def potential(__func__ = None, **kwds):
     """
@@ -170,13 +155,14 @@ def potential(__func__ = None, **kwds):
     def B(parent_name = ., ...)
         return baz(parent_name, ...)
 
-    where baz returns the dtrm B's value conditional
+    where baz returns the deterministic B's value conditional
     on its parents.
 
-    :SeeAlso: Deterministic, dtrm, Stochastic, Potential, stoch, data, Model, Container
+    :SeeAlso:
+      Deterministic, deterministic, Stochastic, Potential, stochastic, data, Model
     """
     def instantiate_pot(__func__):
-        junk, parents = _extract(__func__, kwds, keys, 'Potential')
+        junk, parents = _extract(__func__, kwds, keys, 'Potential', probe=False)
         return Potential(parents=parents, **kwds)
 
     keys = ['logp']
@@ -187,33 +173,35 @@ def potential(__func__ = None, **kwds):
         return instantiate_pot(__func__)
 
     return instantiate_pot
-
+pot = potential
 
 def deterministic(__func__ = None, **kwds):
     """
     Decorator function instantiating deterministic variables. Usage:
-    
+
     @deterministic
     def B(parent_name = ., ...)
         return baz(parent_name, ...)
-        
+
     @deterministic(trace = trace_object)
     def B(parent_name = ., ...)
-        return baz(parent_name, ...)        
-        
+        return baz(parent_name, ...)
+
     where baz returns the variable B's value conditional
     on its parents.
-    
-    :SeeAlso: Deterministic, potential, Stochastic, stoch, data, Model, Container
+
+    :SeeAlso:
+      Deterministic, Potential, potential, Stochastic, stochastic, data, Model,
+      CommonDeterministics
     """
     def instantiate_n(__func__):
-        junk, parents = _extract(__func__, kwds, keys, 'Deterministic')
+        junk, parents = _extract(__func__, kwds, keys, 'Deterministic', probe=False)
         return Deterministic(parents=parents, **kwds)
-        
+
     keys = ['eval']
-    
+
     instantiate_n.kwds = kwds
-    
+
     if __func__:
         return instantiate_n(__func__)
 
@@ -222,38 +210,91 @@ def deterministic(__func__ = None, **kwds):
 # Shortcut alias
 dtrm = deterministic
 
-def data(obj=None, **kwds):
+def observed(obj=None, **kwds):
     """
-    Decorator function to instantiate data objects.     
-    If given a Stochastic, sets a the isdata flag to True.
-    
+    Decorator function to instantiate data objects.
+    If given a Stochastic, sets a the observed flag to True.
+
     Can be used as
-    
-    @data
+
+    @observed
     def A(value = ., parent_name = .,  ...):
         return foo(value, parent_name, ...)
-    
+
     or as
-    
-    @data
-    @stoch
+
+    @stochastic(observed=True)
     def A(value = ., parent_name = .,  ...):
         return foo(value, parent_name, ...)
-        
-    
-    :SeeAlso: stoch, Stochastic, dtrm, Deterministic, potential, Potential, Model, Container
+
+
+    :SeeAlso:
+      stochastic, Stochastic, dtrm, Deterministic, potential, Potential, Model,
+      distributions
     """
+
     if obj is not None:
         if isinstance(obj, Stochastic):
-            obj.isdata=True
+            obj._observed=True
             return obj
         else:
-            p = stoch(__func__=obj, isdata=True, **kwds)
+            p = stochastic(__func__=obj, observed=True, **kwds)
             return p
+
+    kwds['observed']=True
+    def instantiate_observed(func):
+        return stochastic(func, **kwds)
+
+    return instantiate_observed
+
+data = observed
+
+def robust_init(stochclass, tries, *args, **kwds):
+    """Robust initialization of a Stochastic. 
     
-    kwds['isdata']=True
-    def instantiate_data(func):
-        return stoch(func, **kwds)
-        
-    return instantiate_data
+    If the evaluation of the log-probability returns a ZeroProbability 
+    error, due for example to a parent being outside of the support for 
+    this Stochastic, the values of parents are randomly sampled until 
+    a valid log-probability is obtained. 
+    
+    If the log-probability is still not valid after `tries` attempts, the
+    original ZeroProbability error is raised.
+    
+    :Parameters:
+    stochclass : Stochastic, eg. Normal, Uniform, ...
+      The Stochastic distribution to instantiate.
+    tries : int
+      Maximum number of times parents will be sampled. 
+    *args, **kwds
+      Positional and keyword arguments to declare the Stochastic variable.
+
+    :Example:
+    >>> lower = pymc.Uniform('lower', 0., 2., value=1.5, rseed=True)
+    >>> pymc.robust_init(pymc.Uniform, 100, 'data', lower=lower, upper=5, value=[1,2,3,4], observed=True)
+    """
+    # Find the direct parents
+    stochs = [arg for arg in (list(args) + kwds.values()) if getattr(arg, '__metaclass__', None) == StochasticMeta]
+            
+    # Find the extended parents
+    parents = stochs 
+    for s in stochs:
+        parents.extend(s.extended_parents)
+    
+    extended_parents = set(parents)
+    
+    # Select the parents with a random method.
+    random_parents = [p for p in extended_parents if p.rseed is True and hasattr(p, 'random')]
+    
+    for i in range(tries):
+        try:
+            return stochclass(*args, **kwds)
+        except ZeroProbability:
+            a,b,c=sys.exc_info()
+            for parent in random_parents:
+                try:
+                    parent.random()
+                except:
+                    raise a,b,c
+                    
+    raise a,b,c
 

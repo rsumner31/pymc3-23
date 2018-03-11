@@ -4,8 +4,14 @@ Test interactive sampler
 
 # TODO: Make real test case.
 
-from PyMC2 import Sampler
-from PyMC2.examples import DisasterModel
+from pymc import MCMC
+from pymc.examples import DisasterModel
+import os, nose
 
-S = Sampler(DisasterModel)
-S.interactive_sample(10000,1000,2)
+def test_interactive():
+    S = MCMC(DisasterModel)
+    S.isample(200,100,2,  out=open('testresults/interactive.log', 'w'))
+
+
+if __name__ == '__main__':
+    nose.runmodule()

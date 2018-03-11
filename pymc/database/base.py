@@ -1,116 +1,316 @@
 """
 Base backend
 
-Trace and Database classes from the other modules should Subclass the base 
-classes. 
+Trace and Database classes from the other modules should Subclass the base
+classes.
+
+Concepts
+--------
+
+Each backend must define a Trace and a Database class that subclass the
+base.Trace and base.Database classes.
+
+The Model itself is given a `db` attribute, an instance of the Database
+class. The __init__ method of the Database class does the work of preparing the
+database. This might mean creating a file, connecting to a remote database
+server, etc.
+
+Right after a Database is instantiated, the Sampler tells it to connect itself
+the model. This is taken care of by the connect_model method. This method
+creates Trace objects for all the tallyable pymc objects. These traces are
+stored in a dictionary called _traces, owned by the Database instance of this
+Sampler. Previously, the Trace instances were owned by the tallyable variables
+themselves. As A.P. pointed out, this is problematic if the same object is used
+in different models, because each new Sampler will overwrite the last Trace
+instance of the variable.
+
+When the `sample` method is called, the Sampler tells the Database to initialize
+itself. Database then tells all the tallyable objects to initialize themselves.
+This might mean creating a numpy array, a list, an sqlite table, etc.
+
+When the Sampler calls `tally`, it sends a message to the Database to tally its
+objects. Each object then appends its current value to the given chain.
+
+At the end of sampling, the Sampler tells the Database to finalize it's state,
+and the database relays the finalize call to each Trace object.
+
+To get the samples from the database, the Sampler class provides a trace method
+``trace(self, name, chain=-1)`` which first sets the db attribute
+_default_chain to chain and returns the trace instance, so that calling
+S.trace('e')[:] will return all samples from the last chain. One potential
+problem with this is that user could simply do ``S.trace('e') = 5`` and
+erase the Trace object. A read-only dictionary-like class could solve
+that problem.
+
+Some backends require being closed before saving the results. This needs to be
+done explicitly by the user.
 """
-import PyMC2
+import pymc
+import types
+import sys, traceback
+import copy
+__all__=['Trace', 'Database']
 
 class Trace(object):
-    """Dummy Trace class.
-    """ 
-    
-    def __init__(self,value=None, obj=None):
-        """Assign an initial value and an internal PyMC object."""
-        self._trace = value
-        if obj is not None:
-            if isinstance(obj, PyMC2.Variable):
-                self._obj = obj
-            else:
-                raise AttributeError, 'Not PyMC object', obj
-        
-    def _initialize(self, length):
-        """Dummy method. Subclass if necessary."""
-        pass
-            
-    def tally(self, index):
-        """Dummy method. Subclass if necessary."""
+    """Base class for Trace objects.
+
+    Each tallyable pymc object is given a trace attribute, which is a Trace
+    instance. These trace methods are generally called by the Database instance
+    or by the user.
+    """
+
+    def __init__(self, name, getfunc=None, db=None):
+        """Create a Trace instance.
+
+        :Parameters:
+        name : string
+          The trace object name. This name should uniquely identify
+          the pymc variable.
+        getfunc : function
+          A function returning the value to tally.
+        db : Database instance
+          The database owning this Trace.
+        """
+        self._getfunc = getfunc
+        self.name = name
+        self.db = db
+        self._chain = -1
+
+    def _initialize(self, chain, length):
+        """Prepare for tallying. Create a new chain."""
+        # If this db was loaded from the disk, it may not have its
+        # tallied step methods' getfuncs yet.
+        if self._getfunc is None:
+            self._getfunc = self.db.model._funs_to_tally[self.name]
+
+
+    def tally(self, chain):
+        """Appends the object's value to a chain.
+
+        :Parameters:
+        chain : integer
+          Chain index.
+        """
         pass
 
-    def truncate(self, index):
-        """Dummy method. Subclass if necessary."""
+    def truncate(self, index, chain):
+        """For backends that preallocate memory, removed the unused memory."""
         pass
 
     def gettrace(self, burn=0, thin=1, chain=-1, slicing=None):
-        """Dummy method. Subclass if necessary.
-        
-        Input:
+        """Return the trace.
+
+        :Parameters:
           - burn (int): The number of transient steps to skip.
           - thin (int): Keep one in thin.
-          - chain (int): The index of the chain to fetch. If None, return all chains. 
-          - slicing: A slice, overriding burn and thin assignement. 
+          - chain (int): The index of the chain to fetch. If None, return all chains.
+          - slicing: A slice, overriding burn and thin assignement.
         """
-        raise AttributeError, self._obj.__name__ + " has no trace"
+        raise AttributeError, self.name + " has no trace"
 
+
+    # By convention, the __call__ method is assigned to gettrace.
     __call__ = gettrace
-    
-   
-    def _finalize(self):
+
+    def __getitem__(self, i):
+        """Return the trace corresponding to item (or slice) i for the chain
+        defined by self._chain.
+        """
+        if type(i) == types.SliceType:
+            return self.gettrace(slicing=i, chain=self._chain)
+        else:
+            return self.gettrace(slicing=slice(i,i), chain=self._chain)
+
+    def _finalize(self, chain):
+        """Execute task necessary when tallying is over for this trace."""
         pass
-    
+
     def length(self, chain=-1):
-        """Return the sample length of given chain. If chain is None,
-        return the total length of all chains."""
+        """Return the length of the trace.
+
+        :Parameters:
+        chain : int or None
+          The chain index. If None, returns the combined length of all chains.
+        """
         pass
+
 
 class Database(object):
-    """Dummy Database backend"""
-    def __init__(self):
-        """Get the Trace from the local scope."""
-        self.Trace = Trace
-        
-    def _initialize(self, length):
-        """Tell the traces to initialize themselves."""
-        for o in self.model._variables_to_tally:
-            o.trace._initialize(length)
-        
-    def tally(self, index):
-        """Dummy method. Subclass if necessary."""
-        for o in self.model._variables_to_tally:
-            o.trace.tally(index)
-            
-    def connect(self, model):
-        """Link the Database to the Model instance. 
-        
-        If database is loaded from a file, restore the objects trace 
-        to their stored value, if a new database is created, instantiate
-        a Trace for the nodes to tally.
+    """Base Database class.
+
+    The Database job is to create a database on disk and communicate
+    with its Trace objects to tally values.
+    """
+
+    def __init__(self, dbname):
+        """Create a Database instance.
+
+        This method:
+         * Assigns the local Trace class to the __Trace__ attribute.
+         * Assings its name to the __name__ attribute.
+         * Does whatever is necessary to set up the database.
+
+        :Note:
+        All arguments to __init__ should begin by db: dbname, dbmode, etc. This
+        is critical to avoid clashes between arguments to Sampler and Database.
+
+        This method should not be subclassed.
+        """
+        self.__Trace__ = Trace
+        self.__name__ = 'base'
+        self.dbname = dbname
+        self.trace_names = []   # A list of sequences of names of the objects to tally.
+        self._traces = {} # A dictionary of the Trace objects.
+        self.chains = 0
+
+    def _initialize(self, funs_to_tally, length=None):
+        """Initialize the tallyable objects.
+
+        Makes sure a Trace object exists for each variable and then initialize
+        the Traces.
+
+        :Parameters:
+        funs_to_tally : dict
+          Name- function pairs.
+        length : int
+          The expected length of the chain. Some database may need the argument
+          to preallocate memory.
+        """
+
+        for name, fun in funs_to_tally.iteritems():
+            if not self._traces.has_key(name):
+                self._traces[name] = self.__Trace__(name=name, getfunc=fun, db=self)
+
+            self._traces[name]._initialize(self.chains, length)
+
+        self.trace_names.append(funs_to_tally.keys())
+
+        self.chains += 1
+
+    def tally(self, chain=-1):
+        """Append the current value of all tallyable object.
+
+       :Parameters:
+       chain : int
+         The index of the chain to append the values to. By default, the values
+         are appended to the last chain.
+        """
+
+        chain = range(self.chains)[chain]
+        for name in self.trace_names[chain]:
+            try:
+                self._traces[name].tally(chain)
+            except:
+                cls, inst, tb = sys.exc_info()
+                print """
+Error tallying %s, will not try to tally it again this chain.
+Did you make all the samevariables and step methods tallyable
+as were tallyable last time you used the database file?
+
+Error:
+
+%s"""%(name, ''.join(traceback.format_exception(cls, inst, tb)))
+                self.trace_names[chain].remove(name)
+
+
+    def connect_model(self, model):
+        """Link the Database to the Model instance.
+
+        In case a new database is created from scratch, ``connect_model``
+        creates Trace objects for all tallyable pymc objects defined in
+        `model`.
+
+        If the database is being loaded from an existing file, ``connect_model``
+        restore the objects trace to their stored value.
+
+        :Parameters:
+        model : pymc.Model instance
+          An instance holding the pymc objects defining a statistical
+          model (stochastics, deterministics, data, ...)
         """
         # Changed this to allow non-Model models. -AP
-        if isinstance(model, PyMC2.Model):
+        # We could also remove it altogether. -DH
+        if isinstance(model, pymc.Model):
             self.model = model
         else:
             raise AttributeError, 'Not a Model instance.'
-                
-        if hasattr(self, '_state_'): 
-            # Restore the state of the Model.
-            for o in model._variables_to_tally:
-                o.trace = getattr(self, o.__name__)
-                o.trace._obj = o
-        else: 
-            # Set a fresh new state
-            for o in model._variables_to_tally:
-                o.trace = self.Trace(obj=o)
-        
-        for o in model._variables_to_tally:
-            o.trace.db = self
-    
-    def _finalize(self):
-        """Tell the traces to finalize themselves."""
-        for o in self.model._variables_to_tally:
-            o.trace._finalize()
-    
+
+        # Restore the state of the Model from an existing Database.
+        # The `load` method will have already created the Trace objects.
+        if hasattr(self, '_state_'):
+            names = set(reduce(list.__add__, self.trace_names, []))
+            for name, fun in model._funs_to_tally.iteritems():
+                if self._traces.has_key(name):
+                    self._traces[name]._getfunc = fun
+                    names.discard(name)
+            # if len(names) > 0:
+            #     print "Some objects from the database have not been assigned a getfunc", names
+
+        # Create a fresh new state.
+        # We will be able to remove this when we deprecate traces on objects.
+        else:
+            for name, fun in model._funs_to_tally.iteritems():
+                if not self._traces.has_key(name):
+                    self._traces[name] = self.__Trace__(name=name, getfunc=fun, db=self)
+
+    def _finalize(self, chain=-1):
+        """Finalize the chain for all tallyable objects."""
+        chain = range(self.chains)[chain]
+        for name in self.trace_names[chain]:
+            self._traces[name]._finalize(chain)
+        self.commit()
+
+    def truncate(self, index, chain=-1):
+        """Tell the traces to truncate themselves at the given index."""
+        chain = range(self.chains)[chain]
+        for name in self.trace_names[chain]:
+            self._traces[name].truncate(index, chain)
+
+    def commit(self):
+        """Flush data to disk."""
+        pass
+
     def close(self):
         """Close the database."""
-        pass
-        
+        self.commit()
+
     def savestate(self, state):
-        """Store a dictionnary containing the state of the Model and its 
+        """Store a dictionnary containing the state of the Model and its
         StepMethods."""
         self._state_ = state
-        
+
     def getstate(self):
-        """Return a dictionary containing the state of the Model and its 
+        """Return a dictionary containing the state of the Model and its
         StepMethods."""
         return getattr(self, '_state_', {})
-        
+
+    def trace(self, name, chain=-1):
+        """Return the trace of a tallyable object stored in the database.
+
+        :Parameters:
+        name : string
+          The name of the tallyable object.
+        chain : int
+          The trace index. Setting `chain=i` will return the trace created by
+          the ith call to `sample`.
+        """
+        trace = copy.copy(self._traces[name])
+        trace._chain = chain
+        return trace
+
+def load(dbname):
+    """Return a Database instance from the traces stored on disk.
+
+    This function should do the following:
+
+     * Create a Database instance `db`.
+     * Assign to `db` Trace instances corresponding to the pymc tallyable
+       objects that are stored on disk.
+     * Assign to `db` a _state_ attribute storing the stepping methods state.
+       If this is not implemented, simply set db._state_ = {}.
+
+    After loading a database `db`, we should be able to call
+    the gettrace method of each tallyable object stored in the database.
+    """
+    pass
+

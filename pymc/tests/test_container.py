@@ -1,14 +1,33 @@
 from numpy.testing import *
 from numpy import *
-from PyMC2.examples import DisasterModel as DM
-from PyMC2 import Container
+from pymc.examples import DisasterModel as DM
+from pymc import Container, Normal
 
-class test_Container(NumpyTestCase):
-    def check(self):
+class test_Container(TestCase):
+    def test_container_parents(self):
+        A = Normal('A',0,1)
+        B = Normal('B',0,1)
+
+        C = Normal('C',[A,B],1)
+
+
+        assert_equal(Container([A,B]).value, [A.value, B.value])
+        assert_equal(C.parents.value['mu'], [A.value, B.value])
+
+    def test_nested_tuple_container(self):
+        A = Normal('A',0,1)
+        try:
+            Container(([A],))
+            raise AssertionError, 'A NotImplementedError should have resulted.'
+        except NotImplementedError:
+            pass
+
+
+    def test(self):
 
 # Test set container:
 
-        S = set([DM.e, DM.s, DM.l])
+        S = [DM.e, DM.s, DM.l]
         R = Container(S)
 
         for item in R:
@@ -38,7 +57,7 @@ class test_Container(NumpyTestCase):
             assert(C[2] is A[2])
             assert(C.value[2] is A[2])
 
-        # Test array container:    
+        # Test array container:
 
         B = ndarray((3,3),dtype=object)
         B[0,:] = DM.e
@@ -70,4 +89,5 @@ class test_Container(NumpyTestCase):
 
 
 if __name__ == '__main__':
-    NumpyTest().run()
+    import unittest
+    unittest.main()
