@@ -599,6 +599,8 @@ class ObservedRV(Factor, TensorVariable):
 
             self.tag.test_value = theano.compile.view_op(data).tag.test_value
 
+    __latex__ = _repr_latex_
+
     @property
     def init_value(self):
         """Convenience attribute to return tag.test_value"""
@@ -629,6 +631,26 @@ class MultiObservedRV(Factor):
         self.logp_elemwiset = distribution.logp(**self.data)
         self.model = model
         self.distribution = distribution
+
+
+def _walk_up_rv(rv):
+    """Walk up theano graph to get inputs for deterministic RV."""
+    all_rvs = []
+    parents = list(itertools.chain(*[j.inputs for j in rv.get_parents()]))
+    if parents:
+        for parent in parents:
+            all_rvs.extend(_walk_up_rv(parent))
+    else:
+        if rv.name:
+            all_rvs.append(rv.name)
+        else:
+            all_rvs.append(r'\text{Constant}')
+    return all_rvs
+
+
+def _latex_repr_rv(rv):
+    """Make latex string for a Deterministic variable"""
+    return r'${} \sim \text{{Deterministic}}({})$'.format(rv.name, r', '.join(_walk_up_rv(rv)))
 
 
 def Deterministic(name, var, model=None):

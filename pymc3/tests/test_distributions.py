@@ -3,7 +3,7 @@ from __future__ import division
 import itertools
 from .helpers import SeededTest
 from ..vartypes import continuous_types
-from ..model import Model, Point, Potential
+from ..model import Model, Point, Potential, Deterministic
 from ..blocking import DictToVarBijection, DictToArrayBijection, ArrayOrdering
 from ..distributions import (DensityDist, Categorical, Multinomial, VonMises, Dirichlet,
                              MvStudentT, MvNormal, ZeroInflatedPoisson,
