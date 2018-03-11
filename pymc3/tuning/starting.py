@@ -3,9 +3,10 @@ Created on Mar 12, 2011
 
 @author: johnsalvatier
 '''
-from scipy import optimize
+from scipy.optimize import minimize
 import numpy as np
-from numpy import isfinite, nan_to_num, logical_not
+from numpy import isfinite, nan_to_num
+from tqdm import tqdm
 import pymc3 as pm
 import time
 from ..vartypes import discrete_types, typefilter
@@ -13,6 +14,7 @@ from ..model import modelcontext, Point
 from ..theanof import inputvars
 from ..blocking import DictToArrayBijection, ArrayOrdering
 
+import warnings
 from inspect import getargspec
 
 __all__ = ['find_MAP']
@@ -20,9 +22,7 @@ __all__ = ['find_MAP']
 def find_MAP(start=None, vars=None, fmin=None,
              return_raw=False, model=None, live_disp=False, callback=None, *args, **kwargs):
     """
-    Sets state to the local maximum a posteriori point given a model.
-    Current default of fmin_Hessian does not deal well with optimizing close
-    to sharp edges, especially if they are the minimum.
+    Finds the local maximum a posteriori point given a model.
 
     Parameters
     ----------
@@ -32,9 +32,17 @@ def find_MAP(start=None, vars=None, fmin=None,
     fmin : function
         Optimization algorithm (Defaults to `scipy.optimize.fmin_bfgs` unless
         discrete variables are specified in `vars`, then
-        `scipy.optimize.fmin_powell` which will perform better).
-    return_raw : Bool
-        Whether to return extra value returned by fmin (Defaults to `False`)
+        `Powell` which will perform better).  For instructions on use of a callable,
+        refer to SciPy's documentation of `optimize.minimize`.
+    return_raw : bool
+        Whether to return the full output of scipy.optimize.minimize (Defaults to `False`)
+    include_transformed : bool
+        Flag for reporting automatically transformed variables in addition
+        to original variables (defaults to False).
+    progressbar : bool
+        Whether or not to display a progress bar in the command line.
+    maxeval : int
+        The maximum number of times the posterior distribution is evaluated.
     model : Model (optional if in `with` context)
     live_disp : Bool
         Display table tracking optimization progress when run from within
@@ -43,7 +51,7 @@ def find_MAP(start=None, vars=None, fmin=None,
         Callback function to pass to scipy optimization routine.  Overrides
         live_disp if callback is given.
     *args, **kwargs
-        Extra args passed to fmin
+        Extra args passed to scipy.optimize.minimize
     """
     model = modelcontext(model)
     if start is None:
@@ -59,24 +67,40 @@ def find_MAP(start=None, vars=None, fmin=None,
         vars = model.cont_vars
     vars = inputvars(vars)
     disc_vars = list(typefilter(vars, discrete_types))
+    allinmodel(vars, model)
+
+    start = Point(start, model=model)
+    bij = DictToArrayBijection(ArrayOrdering(vars), start)
+    logp_func = bij.mapf(model.fastlogp_nojac)
+    x0 = bij.map(start)
 
     try:
-        model.fastdlogp(vars)
-        gradient_avail = True
+        dlogp_func = bij.mapf(model.fastdlogp_nojac(vars))
+        compute_gradient = True
     except AttributeError:
-        gradient_avail = False
+        compute_gradient = False
 
     if disc_vars or not gradient_avail :
         pm._log.warning("Warning: gradient not available." +
                         "(E.g. vars contains discrete variables). MAP " +
                         "estimates may not be accurate for the default " +
                         "parameters. Defaulting to non-gradient minimization " +
-                        "fmin_powell.")
-        fmin = optimize.fmin_powell
+                        "'Powell'.")
+        method = "Powell"
 
-    if fmin is None:
-        if disc_vars:
-            fmin = optimize.fmin_powell
+    if "fmin" in kwargs:
+        fmin = kwargs.pop("fmin")
+        warnings.warn('In future versions, set the optimization algorithm with a string. '
+                      'For example, use `method="L-BFGS-B"` instead of '
+                      '`fmin=sp.optimize.fmin_l_bfgs_b"`.')
+
+        cost_func = CostFuncWrapper(maxeval, progressbar, logp_func)
+
+        # Check to see if minimization function actually uses the gradient
+        if 'fprime' in getargspec(fmin).args:
+            def grad_logp(point):
+                return nan_to_num(-dlogp_func(point))
+            opt_result = fmin(cost_func, bij.map(start), fprime=grad_logp, *args, **kwargs)
         else:
             fmin = optimize.fmin_bfgs
 
@@ -108,11 +132,7 @@ def find_MAP(start=None, vars=None, fmin=None,
         if 'x0' in getargspec(fmin).args:
             r = fmin(logp_o, bij.map(start), callback=callback, *args, **kwargs)
         else:
-            r = fmin(logp_o, callback=callback, *args, **kwargs)
-        compute_gradient = False
-
-    if isinstance(r, tuple):
-        mx0 = r[0]
+            mx0 = opt_result
     else:
         mx0 = r
 
@@ -169,7 +189,7 @@ def find_MAP(start=None, vars=None, fmin=None,
     mx = {v.name: mx[v.name].astype(v.dtype) for v in model.vars}
 
     if return_raw:
-        return mx, r
+        return mx, opt_result
     else:
         return mx
 
