@@ -526,12 +526,20 @@ def sample_ppc(trace, samples=None, model=None, vars=None, size=None,
     else:
         indices = randint(0, len(trace), samples)
 
-    ppc = defaultdict(list)
-    for idx in indices:
-        param = trace[idx]
-        for var in vars:
-            ppc[var.name].append(var.distribution.random(point=param,
-                                                         size=size))
+    try:
+        ppc = defaultdict(list)
+        for idx in indices:
+            param = trace[idx]
+            for var in vars:
+                ppc[var.name].append(var.distribution.random(point=param,
+                                                             size=size))
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        if progressbar:
+            indices.close()
 
     return {k: np.asarray(v) for k, v in ppc.items()}
 
