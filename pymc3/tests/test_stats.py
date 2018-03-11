@@ -21,10 +21,15 @@ class TestStats(SeededTest):
 
     def test_autocorr(self):
         """Test autocorrelation and autocovariance functions"""
-        assert_almost_equal(autocorr(self.normal_sample), 0, 2)
+        assert_almost_equal(autocorr(self.normal_sample)[1], 0, 2)
         y = [(self.normal_sample[i - 1] + self.normal_sample[i]) /
              2 for i in range(1, len(self.normal_sample))]
-        assert_almost_equal(autocorr(y), 0.5, 2)
+        assert_almost_equal(autocorr(np.asarray(y))[1], 0.5, 2)
+        lag = 5
+        acov_np = np.cov(self.normal_sample[:-lag],
+                         self.normal_sample[lag:], bias=1)[0, 1]
+        acov_pm = autocov(self.normal_sample)[lag]
+        assert_almost_equal(acov_pm, acov_np, 7)
 
     def test_dic(self):
         """Test deviance information criterion calculation"""

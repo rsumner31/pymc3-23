@@ -183,6 +183,9 @@ def effective_n(mtrace):
     is the first odd positive integer for which the sum
     :math:`\hat{\rho}_{T+1} + \hat{\rho}_{T+1}` is negative.
 
+    The current implementation is similar to Stan, which uses Geyer's initial
+    monotone sequence criterion (Geyer, 1992; Geyer, 2011).
+
     References
     ----------
     Gelman et al. (2014)"""
@@ -256,7 +259,7 @@ def effective_n(mtrace):
 
         # iterate over tuples of indices of the shape of var
         for tup in np.ndindex(*list(x.shape[:-2])):
-            _n_eff[tup] = get_neff(x[tup], Vhat[tup])
+            _n_eff[tup] = get_neff(x[tup])
 
         # we could be using np.squeeze here, but we don't want to squeeze
         # out dummy dimensions that a user inputs
