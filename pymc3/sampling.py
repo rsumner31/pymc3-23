@@ -326,13 +326,13 @@ def iter_sample(draws, step, start=None, trace=None, chain=0, tune=None,
         is given, it must contain samples for the chain number `chain`.
         If None or a list of variables, the NDArray backend is used.
     chain : int
-        Chain number used to store sample in backend. If `njobs` is
+        Chain number used to store sample in backend. If `cores` is
         greater than one, chain numbers will start here.
     tune : int
         Number of iterations to tune, if applicable (defaults to None)
     model : Model (optional if in `with` context)
     random_seed : int or list of ints
-        A list is accepted if more if `njobs` is greater than one.
+        A list is accepted if more if `cores` is greater than one.
 
     Example
     -------
@@ -442,7 +442,7 @@ def _parallel_random_seed(random_seed, njobs):
 
 
 def _mp_sample(**kwargs):
-    njobs = kwargs.pop('njobs')
+    cores = kwargs.pop('cores')
     chain = kwargs.pop('chain')
     random_seed = kwargs.pop('random_seed')
     start = kwargs.pop('start')

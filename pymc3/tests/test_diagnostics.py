@@ -155,7 +155,7 @@ class TestDiagnostics(SeededTest):
             start = find_MAP()
             step = NUTS(scaling=start)
             ptrace = sample(0, tune=n_samples, step=step, start=start,
-                            njobs=n_jobs, discard_tuned_samples=False,
+                            cores=n_jobs, discard_tuned_samples=False,
                             random_seed=42)
 
         n_effective = effective_n(ptrace)['x']
@@ -177,7 +177,7 @@ class TestDiagnostics(SeededTest):
             start = find_MAP()
             step = NUTS(scaling=start)
             ptrace = sample(0, tune=n_samples, step=step, start=start,
-                            njobs=n_jobs, discard_tuned_samples=False,
+                            cores=n_jobs, discard_tuned_samples=False,
                             random_seed=42)
 
         n_effective = effective_n(ptrace)['x']
