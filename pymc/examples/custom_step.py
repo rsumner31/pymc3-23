@@ -1,4 +1,5 @@
 import pymc as pm
+from pymc import six
 import numpy as np
 
 
@@ -23,7 +24,7 @@ class TruncatedMetropolis(pm.Metropolis):
         lp_bak = pm.truncnorm_like(last_val, cur_val, tau, self.low_bound, self.up_bound)
 
         if self.verbose > 1:
-            print self._id + ': Hastings factor %f'%(lp_bak - lp_for)
+            six.print_(self._id + ': Hastings factor %f'%(lp_bak - lp_for))
         return lp_bak - lp_for
 
 
@@ -49,7 +50,7 @@ data = np.array([-1.6464815 , -0.86463278,  0.80656378,  0.67664181, -0.34312965
 mu = pm.Normal('mu',0,.01, value=0)
 tau = pm.Exponential('tau',.01, value=1)
 cutoff = pm.Exponential('cutoff',1, value=1.3)
-D = pm.Truncnorm('D',mu,tau,-np.inf,cutoff,value=data,observed=True)
+D = pm.TruncatedNormal('D',mu,tau,-np.inf,cutoff,value=data,observed=True)
 
 M = pm.MCMC([mu,tau,cutoff,D])
 

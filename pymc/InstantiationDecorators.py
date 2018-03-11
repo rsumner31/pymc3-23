@@ -3,14 +3,24 @@ The decorators stochastic, deterministic, discrete_stochastic, binary_stochastic
 are defined here, but the actual objects are defined in PyMCObjects.py
 """
 
-__all__ = ['stochastic', 'stoch', 'deterministic', 'dtrm', 'potential', 'pot', 'data', 'observed', 'robust_init']
+__all__ = ['stochastic', 'stoch', 'deterministic', 'dtrm', 'potential', 'pot', 'data', 'observed', 'robust_init','disable_special_methods','enable_special_methods','check_special_methods']
 
 import sys, inspect, pdb
 from imp import load_dynamic
-from PyMCObjects import Stochastic, Deterministic, Potential
-from Node import ZeroProbability, ContainerBase, Node, StochasticMeta
-from Container import Container
+from .PyMCObjects import Stochastic, Deterministic, Potential
+from .Node import ZeroProbability, ContainerBase, Node, StochasticMeta
+from .Container import Container
 import numpy as np
+
+special_methods_available = [True]
+def disable_special_methods(sma=special_methods_available):
+    sma[0]=False
+def enable_special_methods(sma=special_methods_available):
+    sma[0]=True
+def check_special_methods(sma=special_methods_available):
+    return sma[0]
+
+from . import six
 
 def _extract(__func__, kwds, keys, classname, probe=True):
     """
@@ -19,7 +29,7 @@ def _extract(__func__, kwds, keys, classname, probe=True):
 
     # Add docs and name
     kwds['doc'] = __func__.__doc__
-    if not kwds.has_key('name'):
+    if not 'name' in kwds:
         kwds['name'] = __func__.__name__
     # kwds.update({'doc':__func__.__doc__, 'name':__func__.__name__})
 
@@ -28,6 +38,8 @@ def _extract(__func__, kwds, keys, classname, probe=True):
 
     # This gets used by stochastic to check for long-format logp and random:
     if probe:
+        cur_status = check_special_methods()
+        disable_special_methods()
         # Define global tracing function (I assume this is for debugging??)
         # No, it's to get out the logp and random functions, if they're in there.
         def probeFunc(frame, event, arg):
@@ -40,6 +52,7 @@ def _extract(__func__, kwds, keys, classname, probe=True):
         sys.settrace(probeFunc)
 
         # Get the functions logp and random (complete interface).
+        # Disable special methods to prevent the formation of a hurricane of Deterministics
         try:
             __func__()
         except:
@@ -47,9 +60,12 @@ def _extract(__func__, kwds, keys, classname, probe=True):
                 kwds['logp']=__func__
             else:
                 kwds['eval'] =__func__
+        # Reenable special methods.
+        if cur_status:
+            enable_special_methods()
 
     for key in keys:
-        if not kwds.has_key(key):
+        if not key in kwds:
             kwds[key] = None
 
     for key in ['logp', 'eval']:
@@ -71,7 +87,7 @@ def _extract(__func__, kwds, keys, classname, probe=True):
             err_str +=  " " + args[i + ('value' in args)]
             if i < arg_deficit-1:
                 err_str += ','
-        raise ValueError, err_str
+        raise ValueError(err_str)
 
     # Fill in parent dictionary
     try:
@@ -79,10 +95,7 @@ def _extract(__func__, kwds, keys, classname, probe=True):
     except TypeError:
         pass
 
-    if parents.has_key('value'):
-        value = parents.pop('value')
-    else:
-        value = None
+    value = parents.pop('value', None)
 
     return (value, parents)
 
@@ -132,7 +145,7 @@ def stochastic(__func__=None, __class__=Stochastic, binary=False, discrete=False
     """
 
     def instantiate_p(__func__):
-        value, parents = _extract(__func__, kwds, keys, 'Stochastic')
+        value, parents = _extract(__func__, kwds, keys, 'Stochastic') 
         return __class__(value=value, parents=parents, **kwds)
 
     keys = ['logp','random','rseed']
@@ -250,21 +263,21 @@ def observed(obj=None, **kwds):
 data = observed
 
 def robust_init(stochclass, tries, *args, **kwds):
-    """Robust initialization of a Stochastic. 
-    
-    If the evaluation of the log-probability returns a ZeroProbability 
-    error, due for example to a parent being outside of the support for 
-    this Stochastic, the values of parents are randomly sampled until 
-    a valid log-probability is obtained. 
-    
+    """Robust initialization of a Stochastic.
+
+    If the evaluation of the log-probability returns a ZeroProbability
+    error, due for example to a parent being outside of the support for
+    this Stochastic, the values of parents are randomly sampled until
+    a valid log-probability is obtained.
+
     If the log-probability is still not valid after `tries` attempts, the
     original ZeroProbability error is raised.
-    
+
     :Parameters:
     stochclass : Stochastic, eg. Normal, Uniform, ...
       The Stochastic distribution to instantiate.
     tries : int
-      Maximum number of times parents will be sampled. 
+      Maximum number of times parents will be sampled.
     *args, **kwds
       Positional and keyword arguments to declare the Stochastic variable.
 
@@ -273,28 +286,29 @@ def robust_init(stochclass, tries, *args, **kwds):
     >>> pymc.robust_init(pymc.Uniform, 100, 'data', lower=lower, upper=5, value=[1,2,3,4], observed=True)
     """
     # Find the direct parents
-    stochs = [arg for arg in (list(args) + kwds.values()) if getattr(arg, '__metaclass__', None) == StochasticMeta]
-            
+    stochs = [arg for arg in (list(args) + list(kwds.values())) \
+                                if isinstance(arg.__class__, StochasticMeta)]
+
     # Find the extended parents
-    parents = stochs 
+    parents = stochs
     for s in stochs:
         parents.extend(s.extended_parents)
-    
+
     extended_parents = set(parents)
-    
+
     # Select the parents with a random method.
     random_parents = [p for p in extended_parents if p.rseed is True and hasattr(p, 'random')]
-    
+
     for i in range(tries):
         try:
             return stochclass(*args, **kwds)
         except ZeroProbability:
-            a,b,c=sys.exc_info()
+            exc = sys.exc_info()
             for parent in random_parents:
                 try:
                     parent.random()
                 except:
-                    raise a,b,c
-                    
-    raise a,b,c
+                    six.reraise(*exc)
+
+    six.reraise(*exc)
 

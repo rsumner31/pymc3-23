@@ -5,24 +5,61 @@
 # Author: David Huard, 2006
 
 import numpy as np
-import sys, inspect, select, os,  time
+import sys, select, os,  time
 from copy import copy
-from PyMCObjects import Stochastic, Deterministic, Node, Variable, Potential, ZeroProbability
-import flib
+from .PyMCObjects import Variable
+from . import flib
 import pdb
 from numpy.linalg.linalg import LinAlgError
-from numpy.linalg import cholesky, eigh, det, inv
-from Node import logp_of_set
+from numpy.linalg import cholesky, eigh
+from .Node import logp_of_set, logp_gradient_of_set
+import types
+from .datatypes import *
 
-from numpy import sqrt, obj2sctype, ndarray, asmatrix, array, pi, prod, exp,\
-    pi, asarray, ones, atleast_1d, iterable, linspace, diff, around, log10, \
-    zeros, arange, digitize, apply_along_axis, concatenate, bincount, sort, \
-    hsplit, argsort, vectorize, inf, shape, ndim, swapaxes, transpose as tr
+from . import six
+from .six import print_
+reduce = six.moves.reduce
 
-__all__ = ['check_list', 'autocorr', 'calc_min_interval', 'check_type', 'ar1', 'ar1_gen', 'draw_random', 'histogram', 'hpd', 'invcdf', 'make_indices', 'normcdf', 'quantiles', 'rec_getattr', 'rec_setattr', 'round_array', 'trace_generator','msqrt','safe_len', 'log_difference', 'find_generations','crawl_dataless', 'logit', 'invlogit']
+from numpy import (sqrt, ndarray, asmatrix, array, prod,
+                   asarray, atleast_1d, iterable, linspace, diff,
+                   around, log10, zeros, arange, digitize, apply_along_axis,
+                   concatenate, bincount, sort, hsplit, argsort, inf, shape,
+                   ndim, swapaxes, ravel, diag, cov, transpose as tr)
 
-logit = vectorize(lambda x: flib.logit(x))
-invlogit = vectorize(lambda x: flib.invlogit(x))
+__all__ = ['append', 'check_list', 'autocorr', 'calc_min_interval',
+           'check_type', 'ar1',
+           'ar1_gen', 'draw_random', 'histogram', 'hpd', 'invcdf',
+           'make_indices', 'normcdf', 'quantiles', 'rec_getattr',
+           'rec_setattr', 'round_array', 'trace_generator','msqrt','safe_len',
+           'log_difference', 'find_generations','crawl_dataless', 'logit',
+           'invlogit','stukel_logit','stukel_invlogit','symmetrize','value']
+
+symmetrize = flib.symmetrize
+
+def value(a):
+    """
+    Returns a.value if a is a Variable, or just a otherwise.
+    """
+    if isinstance(a, Variable):
+        return a.value
+    else:
+        return a
+
+
+# =====================================================================
+# = Please don't use numpy.vectorize with these! It will leak memory. =
+# =====================================================================
+def logit(theta):
+    return flib.logit(ravel(theta)).reshape(shape(theta))
+
+def invlogit(ltheta):
+    return flib.invlogit(ravel(ltheta)).reshape(shape(ltheta))
+
+def stukel_invlogit(ltheta,a1,a2):
+    return flib.stukel_invlogit(ravel(ltheta),a1,a2).reshape(shape(ltheta))
+
+def stukel_logit(theta,a1,a2):
+    return flib.stukel_logit(ravel(theta),a1,a2).reshape(shape(theta))
 
 def check_list(thing, label):
     if thing is not None:
@@ -30,49 +67,10 @@ def check_list(thing, label):
             return [thing]
         return thing
 
-
 # TODO: Look into using numpy.core.numerictypes to do this part.
-from numpy import bool_
-from numpy import byte, short, intc, int_, longlong, intp
-from numpy import ubyte, ushort, uintc, uint, ulonglong, uintp
-from numpy import single, float_, longfloat
-from numpy import csingle, complex_, clongfloat
+
 
 # TODO : Wrap the nd histogramming fortran function.
-
-integer_dtypes = [int, uint, long, byte, short, intc, int_, longlong, intp, ubyte, ushort, uintc, uint, ulonglong, uintp]
-float_dtypes = [float, single, float_, longfloat]
-complex_dtypes = [complex, csingle, complex_, clongfloat]
-bool_dtypes = [bool, bool_]
-def check_type(stochastic):
-    """
-    type, shape = check_type(stochastic)
-
-    Checks the type of a stochastic's value. Output value 'type' may be
-    bool, int, float, or complex. Nonnative numpy dtypes are lumped into
-    these categories. Output value 'shape' is () if the stochastic's value
-    is scalar, or a nontrivial tuple otherwise.
-    """
-    val = stochastic.value
-    if val.__class__ is bool:
-        return bool, ()
-    elif val.__class__ in [int, uint, long, byte, short, intc, int_, longlong, intp, ubyte, ushort, uintc, uint, ulonglong, uintp]:
-        return int, ()
-    elif val.__class__ in [float, single, float_, longfloat]:
-        return float, ()
-    elif val.__class__ in [complex, csingle, complex_, clongfloat]:
-        return complex, ()
-    elif isinstance(val, ndarray):
-        if obj2sctype(val) is bool_:
-            return bool, val.shape
-        elif obj2sctype(val) in [byte, short, intc, int_, longlong, intp, ubyte, ushort, uintc, uint, ulonglong, uintp]:
-            return int, val.shape
-        elif obj2sctype(val) in [single, float_, longfloat]:
-            return float, val.shape
-        elif obj2sctype(val) in [csingle, complex_, clongfloat]:
-            return complex, val.shape
-    else:
-        return 'object', ()
 
 def safe_len(val):
     if np.isscalar(val):
@@ -93,7 +91,7 @@ def round_array(array_in):
         return int(np.round(array_in))
 
 try:
-    from flib import dchdc_wrap
+    from .flib import dchdc_wrap
     def msqrt(C):
         """
         U=incomplete_chol(C)
@@ -111,7 +109,7 @@ try:
         chol = C.copy()
         piv, N = dchdc_wrap(a=chol)
         if N<0:
-            raise ValueError, "Matrix does not appear to be positive semidefinite"
+            raise ValueError("Matrix does not appear to be positive semidefinite")
         return asmatrix(chol[:N,argsort(piv)])
 
 except:
@@ -143,24 +141,24 @@ def histogram(a, bins=10, range=None, normed=False, weights=None, axis=None, str
     Return the distribution of sample.
 
     :Stochastics:
-      - `a` : Array sample.
-      - `bins` : Number of bins, or an array of bin edges, in which case the
-                range is not used. If 'Scott' or 'Freeman' is passed, then
-                the named method is used to find the optimal number of bins.
-      - `range` : Lower and upper bin edges, default: [min, max].
-      - `normed` :Boolean, if False, return the number of samples in each bin,
-                if True, return the density.
-      - `weights` : Sample weights. The weights are normed only if normed is
-                True. Should weights.sum() not equal len(a), the total bin count
-                will not be equal to the number of samples.
-      - `axis` : Specifies the dimension along which the histogram is computed.
-                Defaults to None, which aggregates the entire sample array.
-      - `strategy` : Histogramming method (binsize, searchsorted or digitize).
+      `a` : Array sample.
+      `bins` : Number of bins, or an array of bin edges, in which case the
+              range is not used. If 'Scott' or 'Freeman' is passed, then
+              the named method is used to find the optimal number of bins.
+      `range` : Lower and upper bin edges, default: [min, max].
+      `normed` :Boolean, if False, return the number of samples in each bin,
+              if True, return the density.
+      `weights` : Sample weights. The weights are normed only if normed is
+              True. Should weights.sum() not equal len(a), the total bin count
+              will not be equal to the number of samples.
+      `axis` : Specifies the dimension along which the histogram is computed.
+              Defaults to None, which aggregates the entire sample array.
+      `strategy` : Histogramming method (binsize, searchsorted or digitize).
 
     :Return:
-      - `H` : The number of samples in each bin.
+      `H` : The number of samples in each bin.
         If normed is True, H is a frequency distribution.
-      - dict{ 'edges':      The bin edges, including the rightmost edge.
+      dict{ 'edges':      The bin edges, including the rightmost edge.
         'upper':      Upper outliers.
         'lower':      Lower outliers.
         'bincenters': Center of bins.
@@ -225,9 +223,9 @@ def histogram(a, bins=10, range=None, normed=False, weights=None, axis=None, str
                 strategy = 'digitize'
     else:
         if strategy not in ['binsize', 'digitize', 'searchsort']:
-            raise 'Unknown histogramming strategy.', strategy
+            raise ValueError('Unknown histogramming strategy.', strategy)
         if strategy == 'binsize' and not even:
-            raise 'This binsize strategy cannot be used for uneven bins.'
+            raise ValueError('This binsize strategy cannot be used for uneven bins.')
 
     # Stochastics for the fixed_binsize functions.
     start = float(edges[0])
@@ -396,18 +394,27 @@ def _optimize_binning(x, range, method='Freedman'):
     elif method.lower()=='scott':
         width = 3.49 * x.std()* N**(-1./3)
     else:
-        raise 'Method must be Scott or Freedman', method
+        raise ValueError('Method must be Scott or Freedman', method)
     return int(diff(range)/width)
 
-def normcdf(x):
+def normcdf(x, log=False):
     """Normal cumulative density function."""
-    x = np.atleast_1d(x)
-    return np.array([.5*(1+flib.derf(y/sqrt(2))) for y in x])
+    y = np.atleast_1d(x).copy()
+    flib.normcdf(y)
+    if log:
+        # return np.where(y>0, np.log(y), -np.inf)
+        return np.array([-np.inf if not yi else np.log(yi) for yi in y])
+    return y
 
-@vectorize
+def lognormcdf(x, mu, tau):
+    """Log-normal cumulative density function"""
+    x = np.atleast_1d(x)
+    return np.array([0.5*(1-flib.derf(-(np.sqrt(tau/2))*(np.log(y)-mu))) for y in x])
+
 def invcdf(x):
     """Inverse of normal cumulative density function."""
-    return flib.ppnd16(x,1)
+    x = np.atleast_1d(x)
+    return np.array([flib.ppnd16(y,1) for y in x])
 
 def ar1_gen(rho, mu, sigma, size=1):
     """Create an autoregressive series of order one AR(1) generator.
@@ -461,10 +468,24 @@ def autocorr(x, lag=1):
 
     if not lag: return 1
     if lag<0: return
-    x = np.squeeze(asarray(x))
-    mu = x.mean()
-    v = x.var()
-    return ((x[:-lag]-mu)*(x[lag:]-mu)).sum()/v/(len(x) - lag)
+    # x = np.squeeze(asarray(x))
+    #     mu = x.mean()
+    #     v = x.var()
+    #     return ((x[:-lag]-mu)*(x[lag:]-mu)).sum()/v/(len(x) - lag)
+    S = autocov(x, lag)
+    return S[0,1]/sqrt(prod(diag(S)))
+
+def autocov(x, lag=1):
+    """
+    Sample autocovariance at specified lag.
+    The autocovariance is a 2x2 matrix with the variances of
+    x[:-lag] and x[lag:] in the diagonal and the autocovariance
+    on the off-diagonal.
+    """
+
+    if not lag: return 1
+    if lag<0: return
+    return cov(x[:-lag], x[lag:], bias=1)
 
 def trace_generator(trace, start=0, stop=None, step=1):
     """Return a generator returning values from the object's trace.
@@ -493,7 +514,7 @@ def draw_random(obj, **kwds):
     R.next()
     """
     while True:
-        for k,v in kwds.iteritems():
+        for k,v in six.iteritems(kwds):
             obj.parents[k] = v.next()
         yield obj.random()
 
@@ -524,7 +545,15 @@ def rec_setattr(obj, attr, value):
     setattr(reduce(getattr, attrs[:-1], obj), attrs[-1], value)
 
 def hpd(x, alpha):
-    """Calculate HPD (minimum width BCI) of array for given alpha"""
+    """Calculate HPD (minimum width BCI) of array for given alpha
+
+    :Arguments:
+      x : Numpy array
+          An array containing MCMC samples
+      alpha : float
+          Desired probability of type I error
+
+    """
 
     # Make a copy of trace
     x = x.copy()
@@ -625,11 +654,19 @@ def calc_min_interval(x, alpha):
         return min_int
 
     except IndexError:
-        print 'Too few elements for interval calculation'
+        print_('Too few elements for interval calculation')
         return [None,None]
 
-def quantiles(x, qlist=[2.5, 25, 50, 75, 97.5]):
-    """Returns a dictionary of requested quantiles from array"""
+def quantiles(x, qlist=(2.5, 25, 50, 75, 97.5)):
+    """Returns a dictionary of requested quantiles from array
+
+    :Arguments:
+      x : Numpy array
+          An array containing MCMC samples
+      qlist : tuple or list
+          A list of desired quantiles (defaults to (2.5, 25, 50, 75, 97.5))
+
+    """
 
     # Make a copy of trace
     x = x.copy()
@@ -637,7 +674,7 @@ def quantiles(x, qlist=[2.5, 25, 50, 75, 97.5]):
     # For multivariate node
     if x.ndim>1:
         # Transpose first, then sort, then transpose back
-        sx = tr(sort(tr(x)))
+        sx = sort(x.T).T
     else:
         # Sort univariate node
         sx = sort(x)
@@ -649,14 +686,20 @@ def quantiles(x, qlist=[2.5, 25, 50, 75, 97.5]):
         return dict(zip(qlist, quants))
 
     except IndexError:
-        print "Too few elements for quantile calculation"
+        print_("Too few elements for quantile calculation")
 
 def coda_output(pymc_object):
-    """Generate output files that are compatible with CODA"""
+    """Generate output files that are compatible with CODA
 
-    print
-    print "Generating CODA output"
-    print '='*50
+    :Arguments:
+      pymc_object : Model or Node
+          A PyMC object containing MCMC output.
+
+    """
+
+    print_()
+    print_("Generating CODA output")
+    print_('='*50)
 
     name = pymc_object.__name__
 
@@ -677,7 +720,7 @@ def coda_output(pymc_object):
     for v in variables:
 
         vname = v.__name__
-        print "Processing", vname
+        print_("Processing", vname)
 
         try:
             index = _process_trace(trace_file, index_file, v.trace(), vname, index)
@@ -710,12 +753,13 @@ def _process_trace(trace_file, index_file, trace, name, index):
 
 def log_difference(lx, ly):
     """Returns log(exp(lx) - exp(ly)) without leaving log space."""
+
     # Negative log of double-precision infinity
     li=-709.78271289338397
     diff = ly - lx
     # Make sure log-difference can succeed
     if np.any(diff>=0):
-        raise ValueError, 'Cannot compute log(x-y), because y>=x for some elements.'
+        raise ValueError('Cannot compute log(x-y), because y>=x for some elements.')
     # Otherwise evaluate log-difference
     return lx + np.log(1.-np.exp(diff))
 
@@ -727,7 +771,7 @@ def getInput():
         import msvcrt
         if msvcrt.kbhit():  # Check for a keyboard hit.
             input += msvcrt.getch()
-            print input
+            print_(input)
         else:
             time.sleep(.1)
 
@@ -754,10 +798,13 @@ def crawl_dataless(sofar, gens):
     matter that there won't be one contiguous group.
     """
     new_gen = set([])
-    all_ext_parents = reduce(set.__or__, [s.extended_parents for s in gens[-1]], set([]))
+    all_ext_parents = set()
+    for s in gens[-1]:
+        all_ext_parents.update(s.extended_parents)
+
     for p in all_ext_parents:
-        if p._random is not None:
-            if len(p.extended_children & sofar) == len(p.extended_children):
+        if p._random is not None and not p.observed:
+            if len(p.extended_children-sofar) == 0:
                 new_gen.add(p)
     if len(new_gen)==0:
         return sofar, gens
@@ -811,28 +858,69 @@ def find_generations(container, with_data = False):
             children_remaining = False
     return generations
 
-def discrepancy(observed, simulated, expected):
-    """Calculates Freeman-Tukey statistics (Freeman and Tukey 1950) as
-    a measure of discrepancy between observed and simulated data. This
-    is a convenient method for assessing goodness-of-fit (see Brooks et al. 2000).
+def append(nodelist, node, label=None, sep='_'):
+    """
+    Append function to automate the naming of list elements in Containers.
 
-    D(x|\theta) = \sum_j (\sqrt{x_j} - \sqrt{e_j})^2
+    :Arguments:
+        - `nodelist` : List containing nodes for Container.
+        - `node` : Node to be added to list.
+        - `label` : Label to be appended to list (If not passed,
+        defaults to element number).
+        - `sep` : Separator character for label (defaults to underscore).
 
-    :Parameters:
-      observed : Iterable of observed values
-      simulated : Iterable of simulated values
-      expected : Iterable of expeted values
-
-    :Returns:
-      D_obs : Discrepancy of observed values
-      D_sim : Discrepancy of simulated values
+    :Return:
+        - `nodelist` : Passed list with node added.
 
     """
 
-    D_obs = sum([(sqrt(x)-sqrt(e))**2 for x,e in zip(observed, expected)])
-    D_sim = sum([(sqrt(s)-sqrt(e))**2 for s,e in zip(simulated, expected)])
+    nname = node.__name__
 
-    return D_obs, D_sim
+    # Determine label
+    label = label or len(nodelist)
+
+    # Look for separator at the end of name
+    ind = nname.rfind(sep)
+
+    # If there is no separator, we will remove last character and
+    # replace with label.
+    node.__name__ = nname[:ind] + sep + str(label)
+
+    nodelist.append(node)
+
+    return nodelist
 
 
 
+#deterministic related utilities
+
+def find_element(names, modules, error_on_fail):
+    element = None
+    found = False
+
+    if type(names) is str:
+        names = [names]
+
+    if type(modules) is dict or type(modules) is types.ModuleType:
+        modules = [modules]
+
+    for module in modules:
+
+        if type(module) is types.ModuleType:
+            module = copy(module.__dict__)
+        elif type(module) is dict:
+            module = copy(module)
+        else:
+            raise AttributeError
+
+        for name in names:
+            try:
+                function = module[name]
+                found = True
+            except KeyError:
+                pass
+
+    if not found and error_on_fail:
+        raise NameError("no function or variable " + str(names) + " in " + str(modules))
+
+    return function

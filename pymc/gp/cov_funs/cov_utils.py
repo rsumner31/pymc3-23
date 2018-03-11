@@ -1,15 +1,19 @@
 # Copyright (c) Anand Patil, 2007
 
 import numpy as np
-import wrapped_distances
+from . import wrapped_distances
 import inspect
 import imp
 import pickle
-from isotropic_cov_funs import symmetrize, imul
+from .isotropic_cov_funs import symmetrize, imul
 from copy import copy
 import sys,os
 from pymc import get_threadpool_size, map_noreturn
 import pymc
+
+from pymc import six
+xrange = six.moves.xrange
+
 mod_search_path = [pymc.__path__[0]+'/gp/cov_funs', os.getcwd()] + sys.path
 
 
@@ -44,19 +48,20 @@ def regularize_array(A):
     else:
         return A
 
-def import_nested_module(name):
+def import_item(name):
     """
     Useful for importing nested modules such as pymc.gp.cov_funs.isotropic_cov_funs.
+    
+    Updated with code copied from IPython under a BSD license.
     """
-    tree = name.split('.')
-    root = tree[0]
-    submods = tree[1:]
-    mod = imp.load_module(root, *imp.find_module(root, mod_search_path))
-
-    for name in submods:
-        mod = getattr(mod,name)
-
-    return mod
+    package = '.'.join(name.split('.')[0:-1])
+    obj = name.split('.')[-1]
+    
+    if package:
+        module = __import__(package,fromlist=[obj])
+        return module.__dict__[obj]
+    else:
+        return __import__(obj)
 
 
 class covariance_wrapper(object):
@@ -78,40 +83,47 @@ class covariance_wrapper(object):
     def __setstate__(self, state):
         self.__init__(*state)
 
-    def __init__(self, cov_fun_name, cov_fun_module, extra_cov_params, distance_fun_name, distance_fun_module):
+    def __init__(self, cov_fun_name, cov_fun_module, extra_cov_params, distance_fun_name, distance_fun_module, with_x=False):
 
         self.cov_fun_name = cov_fun_name
         self.distance_fun_name = distance_fun_name
 
-        cov_fun_module = import_nested_module(cov_fun_module)
-        cov_fun = getattr(cov_fun_module, cov_fun_name)
+        try:
+            cov_fun = import_item(cov_fun_module + "." + cov_fun_name)
+        except ImportError:
+            cov_fun_module = 'pymc.gp.cov_funs.' + cov_fun_module
+            cov_fun = import_item(cov_fun_module + "." + cov_fun_name)
 
-        distance_fun_module = import_nested_module(distance_fun_module)
-        distance_fun = getattr(distance_fun_module, distance_fun_name)
+        try:
+            distance_fun = import_item(distance_fun_module+"."+distance_fun_name)
+        except ImportError:
+            distance_fun_module = 'pymc.gp.cov_funs.' + distance_fun_module
+            distance_fun = import_item(distance_fun_module+"."+distance_fun_name)
 
-        self.cov_fun_module = cov_fun_module
+        self.cov_fun_module = sys.modules[cov_fun_module]
         self.cov_fun = cov_fun
-        self.distance_fun_module = distance_fun_module
+        self.distance_fun_module = sys.modules[distance_fun_module]
         self.distance_fun = distance_fun
         self.extra_cov_params = extra_cov_params
         self.__doc__ = cov_fun_name + '.' + distance_fun.__name__+ covariance_wrapperdoc[0]
+        self.with_x = with_x
 
         # Add covariance parameters to function signature
-        for parameter in extra_cov_params.iterkeys():
+        for parameter in extra_cov_params:
             self.__doc__ += ', ' + parameter
         # Add distance parameters to function signature
         if hasattr(distance_fun,'extra_parameters'):
             self.extra_distance_params = distance_fun.extra_parameters
-            for parameter in self.extra_distance_params.iterkeys():
+            for parameter in self.extra_distance_params:
                 self.__doc__ += ', ' + parameter
         # Document covariance parameters
         self.__doc__ += covariance_wrapperdoc[1]
         if hasattr(cov_fun, 'extra_parameters'):
-            for parameter in extra_cov_params.iterkeys():
+            for parameter in extra_cov_params:
                 self.__doc__ += "\n\n    - " + parameter + ": " + extra_cov_params[parameter]
         # Document distance parameters.
         if hasattr(distance_fun,'extra_parameters'):
-            for parameter in self.extra_distance_params.iterkeys():
+            for parameter in self.extra_distance_params:
                 self.__doc__ += "\n\n    - " + parameter + ": " + self.extra_distance_params[parameter]
 
         self.__doc__ += "\n\nDistances are computed using "+distance_fun.__name__+":\n\n"+distance_fun.__doc__
@@ -119,7 +131,7 @@ class covariance_wrapper(object):
     def __call__(self,x,y,amp=1.,scale=1.,symm=None,*args,**kwargs):
 
         if amp<0. or scale<0.:
-            raise ValueError, 'The amp and scale parameters must be positive.'
+            raise ValueError('The amp and scale parameters must be positive.')
 
         if symm is None:
             symm = (x is y)
@@ -138,7 +150,7 @@ class covariance_wrapper(object):
         # Split off the distance arguments
         distance_arg_dict = {}
         if hasattr(self.distance_fun, 'extra_parameters'):
-            for key in self.extra_distance_params.iterkeys():
+            for key in self.extra_distance_params:
                 if key in kwargs.keys():
                     distance_arg_dict[key] = kwargs.pop(key)
 
@@ -150,12 +162,11 @@ class covariance_wrapper(object):
             self.distance_fun(C, x, y, cmin=cmin, cmax=cmax, symm=symm, **d_kwargs)
             imul(C, 1./scale, cmin=cmin, cmax=cmax, symm=symm)
             # Compute covariance for this bit
-            self.cov_fun(C, cmin=cmin, cmax=cmax,symm=symm, *c_args, **c_kwargs)
+            if self.with_x:
+                self.cov_fun(C,x,y,cmin=cmin, cmax=cmax,symm=symm,*c_args,**c_kwargs)
+            else:
+                self.cov_fun(C, cmin=cmin, cmax=cmax,symm=symm, *c_args, **c_kwargs)
             imul(C, amp*amp, cmin=cmin, cmax=cmax, symm=symm)
-            # Possibly symmetrize this bit
-            # FIXME: Intermittent errors apparently originating in symmetrize!
-            # if symm:
-            #     symmetrize(C, cmin=cmin, cmax=cmax)
 
         if n_threads <= 1:
             targ(C,x,y,0,-1,symm)
@@ -169,7 +180,9 @@ class covariance_wrapper(object):
 
         return C
 
-
+class covariance_wrapper_with_diag(covariance_wrapper):
+    def diag_call(self, x, amp=1., scale=1., *args, **kwds):
+        return amp**2*np.ones(x.shape[0])
 
 # Common verbiage in the covariance functions' docstrings
 covariance_wrapperdoc = ["(x,y",""", amp=1., scale=1.)
@@ -236,23 +249,26 @@ class covariance_function_bundle(object):
           the output matrix will be symmetric.
     """
 
-    def __init__(self, cov_fun_name, cov_fun_module, extra_cov_params):
+    def __init__(self, cov_fun_name, cov_fun_module, extra_cov_params, ampsq_is_diag=False, with_x=False):
 
         self.cov_fun_name = cov_fun_name
         self.cov_fun_module = cov_fun_module
         self.extra_cov_params = extra_cov_params
+        self.ampsq_is_diag = ampsq_is_diag
+        
+        self.wrappers = []
 
-        self.add_distance_metric('euclidean','wrapped_distances')
-        self.add_distance_metric('geo_rad','wrapped_distances')
-        self.add_distance_metric('geo_deg','wrapped_distances')
-        self.add_distance_metric('aniso_geo_rad','wrapped_distances')
-        self.add_distance_metric('aniso_geo_deg','wrapped_distances')
-        self.add_distance_metric('partition_aniso_geo_deg','wrapped_distances')
-        self.add_distance_metric('partition_aniso_geo_rad','wrapped_distances')
+        self.add_distance_metric('euclidean','wrapped_distances',with_x=with_x)
+        self.add_distance_metric('geo_rad','wrapped_distances',with_x=with_x)
+        self.add_distance_metric('geo_deg','wrapped_distances',with_x=with_x)
+        self.add_distance_metric('aniso_geo_rad','wrapped_distances',with_x=with_x)
+        self.add_distance_metric('aniso_geo_deg','wrapped_distances',with_x=with_x)
+        self.add_distance_metric('partition_aniso_geo_deg','wrapped_distances',with_x=with_x)
+        self.add_distance_metric('partition_aniso_geo_rad','wrapped_distances',with_x=with_x)
 
         self.raw = self.euclidean.cov_fun
 
-    def add_distance_metric(self, distance_fun_name, distance_fun_module):
+    def add_distance_metric(self, distance_fun_name, distance_fun_module, with_x):
         """
         Takes a function that computes a distance matrix for
         points in some coordinate system and returns self's
@@ -278,89 +294,14 @@ class covariance_function_bundle(object):
             - `apply_distance()`
         """
 
-        new_fun = covariance_wrapper(self.cov_fun_name, self.cov_fun_module, self.extra_cov_params,
-                distance_fun_name, distance_fun_module)
+        if self.ampsq_is_diag:
+            kls = covariance_wrapper_with_diag
+        else:
+            kls = covariance_wrapper
+        new_fun = kls(self.cov_fun_name, self.cov_fun_module, self.extra_cov_params, distance_fun_name, distance_fun_module, with_x=with_x)
+        self.wrappers.append(new_fun)
         # try:
         setattr(self, distance_fun_name, new_fun)
         # except:
         #     pass
         return new_fun
-
-
-# def nonstationary(cov_fun):
-#     """
-#     A decorator for an isotropic covariance function. Takes one
-#     additional argument, kernel, which takes a value for input
-#     argument x and returns a kernel matrix Sigma(x), which is square,
-#     positive definite and  of the same rank as the dimension of x, as
-#     in theorem 1 of the reference below.
-#
-#
-#     Christopher J. Paciorek,
-#     "Nonstationary Gaussian processes for regression and spatial modeling",
-#     PhD. Thesis, Carnegie Mellon University Department of Statistics,
-#     May 2003.
-#
-#
-#     TODO: Figure out what to do about the quadratic forms in different
-#     coordinate systems.
-#
-#
-#     Note: No scale parameter is necessary, you can manipulate the kernels
-#     to get the same effect. The amp parameter is still necessary, though.
-#
-#     WARNING: Not implemented yet.
-#     """
-#     def covariance_wrapper(x,y,kernel,amp=1.,*args,**kwargs):
-#         symm = (x is y)
-#         kwargs['symm']=symm
-#
-#         x = regularize_array(x)
-#         if symm:
-#             y=x
-#         else:
-#             # if y_map is not None:
-#             #     y = y_map(y)
-#             y = regularize_array(y)
-#
-#         ndim = x.shape[1]
-#
-#         # Compute and store the kernels (note: you can do this in the loop with no loss
-#         # if symm=False.)
-#         kernels_x = np.zeros((len(x),ndim,ndim),dtype=float)
-#         for i in range(len(x)):
-#             kernels[i,:,:] = kernel(x[i,:])
-#         if not symm:
-#             kernels_y = np.zeros((len(y),ndim,ndim),dtype=float)
-#             for i in range(len(y)):
-#                 kernels[i,:,:] = kernel(y[i,:])
-#
-#         # Compute the distance matrix and the prefactors.
-#         C = np.zeros((len(x),len(y)),dtype=flooat)
-#         prefacs = np.ones(len(x), len(y), dtype=float) * 2. ** (ndim*.5) * amp
-#
-#         for i in range(len(x)):
-#             kern_x = asmatrix(kernels_x[i,:,:])
-#             for j in range(len(y)):
-#                 if symm:
-#                     kern_y = kern_x
-#                 else:
-#                     kern_y = asmatrix(kernels_y[j,:,:])
-#                 sum_kern = .5 * (kern_x + kern_y)
-#                 dev = (x[i,:]-y[j,:])
-#                 # Eventually just make this a half-loop if symm=True, of course.
-#                 C[i,j] = (dev.T * solve(sum_kern, dev))
-#
-#                 # Eventually, make the prefactor zero if one of the kernels is lower
-#                 # rank than the other. Also make it work if the kernels are both
-#                 # not full rank.
-#                 prefacs[i,j] *= (det(kern_x) * det(kern_y))**(.25) / det(sum_kern)**.5
-#
-#         # Overwrite the distance matrix using a Fortran covariance function
-#         cov_fun(C,*args,**kwargs)
-#         C *= prefacs
-#
-#         return C
-#
-#     return covariance_wrapper
-#

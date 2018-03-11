@@ -35,18 +35,21 @@ following sets: stochastics, deterministics, variables, nodes, containers, data,
 These flattened representations are useful for things like cache checking.
 """
 
-from Node import Node, ContainerBase, Variable, StochasticBase, DeterministicBase, PotentialBase, ContainerRegistry
+from .Node import Node, ContainerBase, Variable, StochasticBase, DeterministicBase, PotentialBase, ContainerRegistry
 from copy import copy
 from numpy import ndarray, array, zeros, shape, arange, where, dtype, Inf
 from pymc.Container_values import LCValue, DCValue, ACValue, OCValue
 from types import ModuleType
 import pdb
 
+from pymc import six
+xrange = six.moves.xrange
+
 __all__ = ['Container', 'DictContainer', 'TupleContainer', 'ListContainer', 'SetContainer', 'ObjectContainer', 'ArrayContainer']
 
 def filter_dict(obj):
     filtered_dict = {}
-    for item in obj.__dict__.iteritems():
+    for item in six.iteritems(obj.__dict__):
         if isinstance(item[1], Node) or isinstance(item[1], ContainerBase):
             filtered_dict[item[0]] = item[1]
     return filtered_dict
@@ -136,11 +139,16 @@ def Container(*args):
             return container_class(iterable)
 
     # Wrap mutable objects
-    if hasattr(iterable, '__dict__'):
-        return ObjectContainer(iterable.__dict__)
+    # if hasattr(iterable, '__dict__'):
+    #     return ObjectContainer(iterable.__dict__)
 
     # Otherwise raise an error.
-    raise ValueError, 'No container classes available for class ' + iterable.__class__.__name__ + ', see Container.py for examples on how to write one.'
+    raise ValueError('No container classes available for class ' + iterable.__class__.__name__ + ', see Container.py for examples on how to write one.')
+
+class _A(object):
+    pass
+dict_proxy_type = type(_A.__dict__)
+del _A
 
 def file_items(container, iterable):
     """
@@ -164,7 +172,7 @@ def file_items(container, iterable):
     for item in iterable:
 
         # If this is a dictionary, switch from key to item.
-        if isinstance(iterable, dict):
+        if isinstance(iterable, (dict, dict_proxy_type)):
             key = item
             item = iterable[key]
         # Item counter
@@ -175,9 +183,9 @@ def file_items(container, iterable):
         if isinstance(item, Variable):
             container.variables.add(item)
             if isinstance(item, StochasticBase):
-                if item.observed:
-                    container.observed_stochastics.add(item)
-                else:
+                if item.observed or not getattr(item, 'mask', None) is None:
+                    container.observed_stochastics.add(item)                    
+                if not item.observed:
                     container.stochastics.add(item)
             elif isinstance(item, DeterministicBase):
                 container.deterministics.add(item)
@@ -342,10 +350,10 @@ class TupleContainer(ContainerBase, tuple):
     def __init__(self, iterable):
         new_tup = file_items(self, iterable)
         if len(self.containers)>0:
-            raise NotImplementedError, """We have not figured out how to satisfactorily implement nested TupleContainers.
+            raise NotImplementedError("""We have not figured out how to satisfactorily implement nested TupleContainers.
 The reason is there is no way to change an element of a tuple after it has been created.
 Even the Python-C API makes this impossible by checking that a tuple is new
-before allowing you to change one of its elements."""
+before allowing you to change one of its elements.""")
         ContainerBase.__init__(self, iterable)
         file_items(self, iterable)
         self._value = list(self)
@@ -459,7 +467,7 @@ class DictContainer(ContainerBase, dict):
         self.nonval_keys = []
         self.nonval_obj = []
         self._value = {}
-        for key, obj in self.iteritems():
+        for key, obj in six.iteritems(self):
             if isinstance(obj, Variable) or isinstance(obj, ContainerBase):
                 self.val_keys.append(key)
                 self.val_obj.append(obj)
@@ -488,6 +496,14 @@ class DictContainer(ContainerBase, dict):
         return self._value
 
     value = property(fget = get_value, doc=value_doc)
+
+def conservative_update(obj, dict):
+    for k in dict:
+        if not hasattr(obj, k):
+            try:
+                setattr(obj, k, dict[k])
+            except:
+                pass
 
 class ObjectContainer(ContainerBase):
     """
@@ -529,16 +545,22 @@ class ObjectContainer(ContainerBase):
 
         if isinstance(input, dict):
             input_to_file = input
-            self.__dict__.update(input_to_file)
+            conservative_update(self, input_to_file)
+            # self.__dict__.update(input_to_file)
 
         elif hasattr(input,'__iter__'):
             input_to_file = input
 
         else: # Modules, objects, etc.
             input_to_file = input.__dict__
-            self.__dict__.update(input_to_file)
-
-        self._dict_container = DictContainer(self.__dict__)
+            conservative_update(self, input_to_file)
+            # self.__dict__.update(input_to_file)
+        
+        dictpop = copy(self.__dict__)
+        if 'self' in dictpop:
+            dictpop.pop('self')
+        
+        self._dict_container = DictContainer(dictpop)
         file_items(self, input_to_file)
 
         self._value = copy(self)
@@ -595,7 +617,7 @@ class ArrayContainer(ContainerBase, ndarray):
     containing_classes = [ndarray]
     def __new__(subtype, array_in):
         if not array_in.dtype == dtype('object'):
-            raise ValueError, 'Cannot create container from array whose dtype is not object.'
+            raise ValueError('Cannot create container from array whose dtype is not object.')
 
         C = array(array_in, copy=True).view(subtype)
         C_ravel = C.ravel()

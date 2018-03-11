@@ -16,7 +16,6 @@ strategies:
   - `txt` : keep everything in RAM, and dump samples in txt files once
             sampling is completed,
   - `sqlite` : store data in a sqlite database,
-  - `mysql` : store data in a mysql database,
   - `hdf5` : store data in a hdf5 file, using pytables.
 
 Although what happens under the hood is very different from one backend to
@@ -33,25 +32,20 @@ file. Look at base.py for skeleton classes, and the other modules for examples.
 
 """
 
-__modules__ = ['no_trace', 'txt', 'ram', 'pickle', 'sqlite', 'mysql', 'hdf5', 'hdf52', "__test_import__"]
+__modules__ = ['no_trace', 'txt', 'ram', 'pickle', 'sqlite', 'hdf5', 'hdf52', "__test_import__"]
 
-import no_trace
-import txt
-import ram
-import pickle
+from . import no_trace
+from . import txt
+from . import ram
+from . import pickle
 
 try:
-    import sqlite
+    from . import sqlite
 except ImportError:
     pass
 
 try:
-    import mysql
-except ImportError:
-    pass
-
-try:
-    import hdf5
+    from . import hdf5
 except ImportError:
     pass
 

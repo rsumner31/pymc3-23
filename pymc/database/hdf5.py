@@ -24,6 +24,10 @@ from pymc.database import base, pickle
 from copy import copy
 import tables
 import os, warnings, sys, traceback
+import warnings
+
+from pymc import six
+
 
 __all__ = ['Trace', 'Database', 'load']
 
@@ -57,6 +61,24 @@ class TraceObject(base.Trace):
         #     print self._vlarrays, chain
         #     raise AttributeError
 
+
+    def __getitem__(self, index):
+        """Mimic NumPy indexing for arrays."""
+        chain = self._chain
+        
+        if chain is not None:
+            vlarrays = [self._vlarrays[chain]]
+        else:
+            vlarrays =  self._vlarrays
+        
+        for i, vlarray in enumerate(vlarrays):
+            if i==0:
+                out = np.asarray(vlarray[index])
+            else:
+                out = np.hstack((out, vlarray[index]))
+        
+        return out
+        
     def gettrace(self, burn=0, thin=1, chain=-1, slicing=None):
         """Return the trace (last by default).
 
@@ -71,10 +93,24 @@ class TraceObject(base.Trace):
         slicing : slice object
           A slice overriding burn and thin assignement.
         """
+        
         if chain is not None:
-            return np.array(self._vlarrays[chain])
+            vlarrays = [self._vlarrays[chain]]
         else:
-            return np.concatenate(self._vlarrays[:])
+            vlarrays =  self._vlarrays
+            
+        for i, vlarray in enumerate(vlarrays):
+            if slicing is not None:
+                burn, stop, thin = slicing.start, slicing.stop, slicing.step
+            if slicing is None or stop is None:
+                stop = len(vlarray)
+            col = vlarray[burn:stop:thin]
+            if i==0:
+                data = np.asarray(col)
+            else:
+                data = hstack((data, col))
+
+        return data
 
     __call__ = gettrace
 
@@ -100,6 +136,25 @@ class Trace(base.Trace):
     def tally(self, chain):
         """Adds current value to trace"""
         self.db._rows[chain][self.name] = self._getfunc()
+
+    def __getitem__(self, index):
+        """Mimic NumPy indexing for arrays."""
+        chain = self._chain
+        
+        if chain is not None:
+            tables = [self.db._gettables()[chain],]
+        else:
+            tables = self.db._gettables()
+
+        out = []
+        for table in tables:
+            out.append(table.col(self.name))
+            
+        if np.isscalar(chain):
+            return out[0][index]
+        else:
+            return np.hstack(out)[index]
+
 
     def gettrace(self, burn=0, thin=1, chain=-1, slicing=None):
         """Return the trace (last by default).
@@ -200,18 +255,21 @@ class Database(pickle.Database):
 
         # Deprecation of complevel and complib
         # Remove in V2.1
-        if kwds.has_key('complevel'):
+        if 'complevel' in kwds:
             warnings.warn('complevel has been replaced with dbcomplevel.', DeprecationWarning)
             dbcomplevel = kwds.get('complevel')
-        if kwds.has_key('complib'):
+        if 'complib' in kwds:
             warnings.warn('complib has been replaced with dbcomplib.', DeprecationWarning)
             dbcomplib = kwds.get('complib')
-
-
+        
+        db_exists = os.path.exists(self.dbname)
         self._h5file = tables.openFile(self.dbname, self.mode)
 
-        self.filter = getattr(self._h5file, 'filters', \
-                              tables.Filters(complevel=dbcomplevel, complib=dbcomplib))
+        default_filter = tables.Filters(complevel=dbcomplevel, complib=dbcomplib)
+        if self.mode =='r' or (self.mode=='a' and db_exists):
+            self.filter = getattr(self._h5file, 'filters', default_filter)
+        else:
+            self.filter = default_filter
 
 
         self._tables = self._gettables()  # This should be a dict keyed by chain.
@@ -240,7 +298,7 @@ class Database(pickle.Database):
                             objects[node._v_name] = [node,]
 
             # Note that the list vlarrays is in reverse order.
-            for k, vlarrays in objects.iteritems():
+            for k, vlarrays in six.iteritems(objects):
                 db._traces[k] = TraceObject(name=k, db=db, vlarrays=vlarrays)
                 setattr(db, k, db._traces[k])
 
@@ -278,22 +336,24 @@ class Database(pickle.Database):
         if isinstance(model, pymc.Model):
             self.model = model
         else:
-            raise AttributeError, 'Not a Model instance.'
+            raise AttributeError('Not a Model instance.')
 
         # Restore the state of the Model from an existing Database.
         # The `load` method will have already created the Trace objects.
         if hasattr(self, '_state_'):
-            names = set(reduce(list.__add__, self.trace_names))
-            for name, fun in model._funs_to_tally.iteritems():
-                if self._traces.has_key(name):
+            names = set()
+            for morenames in self.trace_names:
+                names.update(morenames)
+            for name, fun in six.iteritems(model._funs_to_tally):
+                if name in self._traces:
                     self._traces[name]._getfunc = fun
                     names.remove(name)
             if len(names) > 0:
-                print "Some objects from the database have not been assigned a getfunc", names
+                raise RuntimeError("Some objects from the database have not been assigned a getfunc: %s"% ', '.join(names))
 
         # Create a fresh new state. This is now taken care of in initialize.
         else:
-            for name, fun in model._funs_to_tally.iteritems():
+            for name, fun in six.iteritems(model._funs_to_tally):
                 if np.array(fun()).dtype is np.dtype('object'):
                     self._traces[name] = TraceObject(name, getfunc=fun, db=self)
                 else:
@@ -320,7 +380,7 @@ class Database(pickle.Database):
 
         # Create the Table in the chain# group, and ObjectAtoms in chain#/group#.
         table_descr = {}
-        for name, fun in funs_to_tally.iteritems():
+        for name, fun in six.iteritems(funs_to_tally):
 
             arr = asarray(fun())
 
@@ -356,13 +416,13 @@ class Database(pickle.Database):
 
         # Store data objects
         for object in self.model.observed_stochastics:
-            if object.trace is True:
+            if object.keep_trace is True:
                 setattr(table.attrs, object.__name__, object.value)
 
 
        # Make sure the variables have a corresponding Trace instance.
-        for name, fun in funs_to_tally.iteritems():
-            if not self._traces.has_key(name):
+        for name, fun in six.iteritems(funs_to_tally):
+            if name not in self._traces:
                 if np.array(fun()).dtype is np.dtype('object'):
                     self._traces[name] = TraceObject(name, getfunc=fun, db=self)
                 else:
@@ -382,14 +442,14 @@ class Database(pickle.Database):
                 self._traces[name].tally(chain)
             except:
                 cls, inst, tb = sys.exc_info()
-                print """
+                warnings.warn("""
 Error tallying %s, will not try to tally it again this chain.
 Did you make all the samevariables and step methods tallyable
 as were tallyable last time you used the database file?
 
 Error:
 
-%s"""%(name, ''.join(traceback.format_exception(cls, inst, tb)))
+%s"""%(name, ''.join(traceback.format_exception(cls, inst, tb))))
                 self.trace_names[chain].remove(name)
 
         self._rows[chain].append()
@@ -418,7 +478,10 @@ Error:
         if len(self._chains)==0:
             return {}
         elif hasattr(self._chains[chain],'_state_'):
-            return self._chains[chain]._state_[0]
+            if len(self._chains[chain]._state_)>0:
+                return self._chains[chain]._state_[0]
+            else:
+                return {}
         else:
             return {}
 
@@ -433,7 +496,7 @@ Error:
       in terms of PyTables
         columns, and a"""
         D = {}
-        for name, fun in self.model._funs_to_tally.iteritems():
+        for name, fun in six.iteritems(self.model._funs_to_tally):
             arr = asarray(fun())
             D[name] = tables.Col.from_dtype(dtype((arr.dtype,arr.shape)))
         return D, {}
@@ -451,7 +514,7 @@ Error:
             for k,v in self._model_trace_description():
                 assert(stored_descr[k][0]==v[0])
         except:
-            raise "The objects to tally are incompatible with the objects stored in the file."
+            raise ValueError("The objects to tally are incompatible with the objects stored in the file.")
 
     def _gettables(self):
         """Return a list of hdf5 tables name PyMCsamples.
@@ -474,7 +537,7 @@ Error:
         """
 
         if not np.isscalar(chain):
-            raise TypeError, "chain must be a scalar integer."
+            raise TypeError("chain must be a scalar integer.")
 
         table = self._tables[chain]
 
@@ -504,7 +567,7 @@ def load(dbname, dbmode='a'):
         File mode : 'a': append, 'r': read-only.
     """
     if dbmode == 'w':
-        raise AttributeError, "dbmode='w' not allowed for load."
+        raise AttributeError("dbmode='w' not allowed for load.")
     db = Database(dbname, dbmode=dbmode)
 
     return db

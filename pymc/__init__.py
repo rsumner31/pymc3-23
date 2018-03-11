@@ -1,59 +1,59 @@
 """
-Markov Chain methods in Python.
+Markov Chain Monte Carlo sampling toolkit.
 
-A toolkit of stochastic methods for biometric analysis. Features
-a Metropolis-Hastings MCMC sampler and both linear and unscented
-(non-linear) Kalman filters.
+Bayesian estimation, particularly using Markov chain Monte Carlo (MCMC), is an increasingly relevant approach to statistical estimation. However, few statistical software packages implement MCMC samplers, and they are non-trivial to code by hand. pymc is a python package that implements the Metropolis-Hastings algorithm as a python class, and is extremely flexible and applicable to a large suite of problems. pymc includes methods for summarizing output, plotting, goodness-of-fit and convergence diagnostics.
 
-Pre-requisite modules: numpy, matplotlib
-Required external components: TclTk
+pymc only requires NumPy. All other dependencies such as matplotlib, SciPy, pytables, or sqlite are optional.
 
 """
 
-__version__ = '2.1alpha'
+__version__ = '2.2grad'
 
 try:
     import numpy
 except ImportError:
-    raise ImportError, 'NumPy does not seem to be installed. Please see the user guide.'
+    raise ImportError('NumPy does not seem to be installed. Please see the user guide.')
 
 # Core modules
-from threadpool import *
-try:
-    import Container_values
-    del Container_values
-except ImportError:
-    raise ImportError, 'You seem to be importing PyMC from inside its source tree.\n\t\t Please change to another directory and try again.'
-from Node import *
-from Container import *
-from PyMCObjects import *
-from InstantiationDecorators import *
-from CommonDeterministics import *
-from distributions import *
-from Model import *
-from StepMethods import *
-from MCMC import *
-from NormalApproximation import *
+from .threadpool import *
+import os
+import pymc
+if os.getcwd().find(os.path.abspath(os.path.split(os.path.split(pymc.__file__)[0])[0]))>-1:
+    from .six import print_
+    print_('\n\tWarning: You are importing PyMC from inside its source tree.')
+from .Node import *
+from .Container import *
+from .PyMCObjects import *
+from .InstantiationDecorators import *
+from .CommonDeterministics import *
+from .NumpyDeterministics import *
+from .distributions import *
+from .Model import *
+from .StepMethods import *
+from .MCMC import *
+from .NormalApproximation import *
 
 
 
-from tests import test
+from .tests import test
 
 # Utilities modules
-import utils
-import CommonDeterministics
-from CircularStochastic import *
-import distributions
-import gp
+from . import utils
+append = utils.append
+from . import CommonDeterministics
+from . import NumpyDeterministics
+from .CircularStochastic import *
+from . import distributions
+from . import gp
 
 # Optional modules
 try:
-    from diagnostics import *
+    from .diagnostics import *
 except ImportError:
     pass
 
 try:
-    import ScipyDistributions
+    from . import ScipyDistributions
 except ImportError:
     pass
 
@@ -63,17 +63,17 @@ except ImportError:
     pass
 
 try:
-    import sandbox
+    from . import sandbox
 except ImportError:
     pass
 
 try:
-    import graph
+    from . import graph
 except ImportError:
     pass
 
 try:
-    import Matplot
+    from . import Matplot
 except:
     pass
 

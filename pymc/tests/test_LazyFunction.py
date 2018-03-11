@@ -1,8 +1,7 @@
 from numpy.testing import *
 import numpy as np
-from numpy.random import random, normal
-from pymc.LazyFunction import LazyFunction
-from pymc import stochastic, data, deterministic, Normal, potential, ZeroProbability
+from numpy.random import normal
+from pymc import stochastic, observed, deterministic, ZeroProbability
 
 verbose = False
 
@@ -26,9 +25,8 @@ while B.value<0.:
         # print 'B computing'
         return A + normcoef * normal()
 
-@data
-@stochastic(verbose=verbose)
-def C(value = 0., B=[A,B]):
+@observed(verbose=verbose)
+def C(value = 0., B=(A,B)):
     if B[0]<0.:
          return -np.Inf
     else:
@@ -95,14 +93,14 @@ for i in range(1000):
     # If jump was accepted:
     if acc:
         # C's value should be at the head of C's cache
-        assert(L.get_cached_counts()[1,cur_frame] == C.counter.get_count())
+        assert_equal(L.get_cached_counts()[1,cur_frame], C.counter.get_count())
         assert(L.cached_values[cur_frame] is C.logp)
 
     # If jump was rejected:
     else:
 
         # B's value should be at the back of C's cache.
-        assert(L.get_cached_counts()[1,1-cur_frame] == C.counter.get_count())
+        assert_equal(L.get_cached_counts()[1,1-cur_frame], C.counter.get_count())
         assert(L.cached_values[1-cur_frame] is C.logp)
 
     # assert(L.ultimate_args.value[1] is C.value)

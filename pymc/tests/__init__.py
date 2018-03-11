@@ -1,14 +1,31 @@
-# Changeset
-# 19/03/2007 -DH- Commented modules import. They are now imported by testsuite.
-# 15/10/2008 -DH- Testing is now done through nose.
+from __future__ import with_statement
 import warnings
-warnings.simplefilter('default', ImportWarning)
+
 try:
     from numpy.testing import Tester
-    test = Tester().test
+    import numpy
+    numpy.seterr(divide = 'raise', invalid = 'raise')
+    
+    # TODO: Restore this implementation in 2.2, when minimum requirements are changed to Python 2.6
+    # with warnings.catch_warnings():
+    #         warnings.simplefilter('ignore')
+    #         test = Tester().test
+    
+    # Taken from http://stackoverflow.com/questions/2059675/catching-warnings-pre-python-2-6
+    original_filters = warnings.filters[:]
+
+    # Ignore warnings.
+    warnings.simplefilter("ignore")
+
+    try:
+        # Execute the code that presumably causes the warnings.
+        test = Tester().test
+
+    finally:
+        # Restore the list of warning filters.
+        warnings.filters = original_filters
+        
 except ImportError:
     warnings.warn('NumPy 1.2 and nose are required to run the test suite.', ImportWarning)
     def test():
         return "Please install nose to run the test suite."
-
-

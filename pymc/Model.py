@@ -12,18 +12,21 @@ __all__ = ['Model', 'Sampler']
 """ Summary"""
 
 from numpy import zeros, floor
+from numpy.random import randint
 from pymc import database
-from PyMCObjects import Stochastic, Deterministic, Node, Variable, Potential
-from Container import Container, ObjectContainer
+from .PyMCObjects import Stochastic, Deterministic, Node, Variable, Potential
+from .Container import Container, ObjectContainer
 import sys,os
 from copy import copy
 from threading import Thread
-import thread
-from Node import ContainerBase
+from .Node import ContainerBase
 from time import sleep
 import pdb
-import utils
-import warnings, exceptions, traceback
+from . import utils
+import warnings, traceback
+import itertools
+
+from .six import print_, reraise
 
 GuiInterrupt = 'Computation halt'
 Paused = 'Computation paused'
@@ -69,7 +72,7 @@ class Model(ObjectContainer):
 
     :SeeAlso: Sampler, MAP, NormalApproximation, weight, Container, graph.
     """
-    def __init__(self, input=None, name=None, verbose=0):
+    def __init__(self, input=None, name=None, verbose=-1):
         """Initialize a Model instance.
 
         :Parameters:
@@ -121,6 +124,11 @@ class Model(ObjectContainer):
                 except:
                     pass
 
+    def get_node(self, node_name):
+        """Retrieve node with passed name"""
+        for node in self.nodes:
+            if node.__name__ == node_name:
+                return node
 
 
 
@@ -198,6 +206,11 @@ class Sampler(Model):
 
         self._state = ['status', '_current_iter', '_iter']
 
+        if hasattr(db, '_traces'):
+            # Put traces on objects
+            for v in self._variables_to_tally:
+                v.trace = self.db._traces[v.__name__]
+
     def _sum_deviance(self):
         # Sum deviance from all stochastics
 
@@ -210,10 +223,11 @@ class Sampler(Model):
         self._cur_trace_index=0
         self.max_trace_length = iter
         self._iter = iter
-
-        if verbose>0:
-            self.verbose = verbose
+        self.verbose = verbose or 0
         self.seed()
+
+        # Assign Trace instances to tallyable objects.
+        self.db.connect_model(self)
 
         # Initialize database -> initialize traces.
         if length is None:
@@ -233,7 +247,7 @@ class Sampler(Model):
         """Reset the status and tell the database to finalize the traces."""
         if self.status in ['running', 'halt']:
             if self.verbose > 0:
-                print 'Sampling finished normally.'
+                print_('\nSampling finished normally.')
             self.status = 'ready'
 
         self.save_state()
@@ -268,7 +282,7 @@ class Sampler(Model):
                 self.tally()
 
                 if not i % 10000 and self.verbose > 0:
-                    print 'Iteration ', i, ' of ', self._iter
+                    print_('Iteration ', i, ' of ', self._iter)
                     sys.stdout.flush()
 
                 self._current_iter += 1
@@ -285,19 +299,181 @@ class Sampler(Model):
         """
         pass
 
-    def stats(self, alpha=0.05, start=0):
+    def stats(self, variables=None, alpha=0.05, start=0, batches=100, chain=None, quantiles=(2.5, 25, 50, 75, 97.5)):
         """
         Statistical output for variables.
+
+        :Parameters:
+        variables : iterable
+          List or array of variables for which statistics are to be
+          generated. If it is not specified, all the tallied variables
+          are summarized.
+
+        alpha : float
+          The alpha level for generating posterior intervals. Defaults to
+          0.05.
+
+        start : int
+          The starting index from which to summarize (each) chain. Defaults
+          to zero.
+
+        batches : int
+          Batch size for calculating standard deviation for non-independent
+          samples. Defaults to 100.
+
+        chain : int
+          The index for which chain to summarize. Defaults to None (all
+          chains).
         """
+
+        # If no names provided, run them all
+        if variables is None:
+            variables = self._variables_to_tally
+        else:
+            variables = [self.__dict__[i] for i in variables if self.__dict__[i] in self._variables_to_tally]
 
         stat_dict = {}
 
         # Loop over nodes
-        for variable in self._variables_to_tally:
+        for variable in variables:
             # Plot object
-            stat_dict[variable.__name__] = variable.stats(alpha=alpha, start=start)
+            stat_dict[variable.__name__] = self.trace(variable.__name__).stats(alpha=alpha, start=start,
+                batches=batches, chain=chain, quantiles=quantiles)
 
         return stat_dict
+
+    def write_csv(self, filename, variables=None, alpha=0.05, start=0, batches=100,
+        chain=None, quantiles=(2.5, 25, 50, 75, 97.5)):
+        """
+        Save summary statistics to a csv table.
+
+        :Parameters:
+
+        filename : string
+          Filename to save output.
+
+        variables : iterable
+          List or array of variables for which statistics are to be
+          generated. If it is not specified, all the tallied variables
+          are summarized.
+
+        alpha : float
+          The alpha level for generating posterior intervals. Defaults to
+          0.05.
+
+        start : int
+          The starting index from which to summarize (each) chain. Defaults
+          to zero.
+
+        batches : int
+          Batch size for calculating standard deviation for non-independent
+          samples. Defaults to 100.
+
+        chain : int
+          The index for which chain to summarize. Defaults to None (all
+          chains).
+        """
+
+        # Append 'csv' suffix if there is no suffix on the filename
+        if filename.find('.') == -1:
+            filename += '.csv'
+
+        outfile = open(filename, 'w')
+
+        # Write header to file
+        header = 'Parameter, Mean, SD, MC Error, Lower 95% HPD, Upper 95% HPD, '
+        header += ', '.join(['q%s' % i for i in quantiles])
+        outfile.write(header + '\n')
+
+        stats = self.stats(alpha=alpha, start=start, batches=batches, chain=chain, quantiles=quantiles)
+
+        buffer = str()
+        for param in stats:
+
+            values = stats[param]
+
+            try:
+                # Multivariate node
+                shape = values['mean'].shape
+                indices = list(itertools.product(*[range(i) for i in shape]))
+
+                for i in indices:
+                    buffer += self._csv_str(param, values, quantiles, i)
+
+            except AttributeError:
+                # Scalar node
+                buffer += self._csv_str(param, values, quantiles)
+
+        outfile.write(buffer)
+
+        outfile.close()
+
+    def _csv_str(self, param, stats, quantiles, index=None):
+        """Support function for write_csv"""
+
+        buffer = param
+        if not index:
+            buffer += ', '
+        else:
+            buffer += '_' + '_'.join([str(i) for i in index]) + ', '
+
+        for stat in ('mean','standard deviation','mc error'):
+            buffer += str(stats[stat][index]) + ', '
+
+        # Index to interval label
+        iindex = [key.split()[-1] for key in stats.keys()].index('interval')
+        interval = stats.keys()[iindex]
+        buffer +=  ', '.join(stats[interval][index].astype(str))
+
+        # Process quantiles
+        qvalues = stats['quantiles']
+        for q in quantiles:
+            buffer += ', ' + str(qvalues[q][index])
+
+        return buffer + '\n'
+
+
+    def summary(self, variables=None, alpha=0.05, start=0, batches=100,
+        chain=None, roundto=3):
+        """
+        Generate a pretty-printed summary of the model's variables.
+
+        :Parameters:
+        alpha : float
+          The alpha level for generating posterior intervals. Defaults to
+          0.05.
+
+        start : int
+          The starting index from which to summarize (each) chain. Defaults
+          to zero.
+
+        batches : int
+          Batch size for calculating standard deviation for non-independent
+          samples. Defaults to 100.
+
+        chain : int
+          The index for which chain to summarize. Defaults to None (all
+          chains).
+
+        roundto : int
+          The number of digits to round posterior statistics.
+
+        quantiles : tuple or list
+          The desired quantiles to be calculated. Defaults to (2.5, 25, 50, 75, 97.5).
+        """
+
+
+        # If no names provided, run them all
+        if variables is None:
+            variables = self._variables_to_tally
+        else:
+            variables = [self.__dict__[i] for i in variables if self.__dict__[i] in self._variables_to_tally]
+
+        # Loop over nodes
+        for variable in variables:
+            variable.summary(alpha=alpha, start=start, batches=batches, chain=chain,
+                roundto=roundto)
+
 
     # Property --- status : the sampler state.
     def status():
@@ -316,7 +492,7 @@ class Sampler(Model):
             if value in ['running', 'paused', 'halt', 'ready']:
                 self.__status=value
             else:
-                raise AttributeError, value
+                raise AttributeError(value)
         return locals()
     status = property(**status())
 
@@ -335,7 +511,6 @@ class Sampler(Model):
           - `txt` : Traces stored in memory and saved in txt files at end of
                 sampling.
           - `sqlite` : Traces stored in sqlite database.
-          - `mysql` : Traces stored in a mysql database.
           - `hdf5` : Traces stored in an HDF5 file.
         """
         # Objects that are not to be tallied are assigned a no_trace.Trace
@@ -343,11 +518,20 @@ class Sampler(Model):
 
         no_trace = getattr(database, 'no_trace')
         self._variables_to_tally = set()
-        for object in self.stochastics | self.deterministics :
+        for object in self.stochastics | self.deterministics:
 
-            if object.trace:
+            if object.keep_trace:
                 self._variables_to_tally.add(object)
-                self._funs_to_tally[object.__name__] = object.get_value
+                try:
+                    if object.mask is None:
+                        # Standard stochastic
+                        self._funs_to_tally[object.__name__] = object.get_value
+                    else:
+                        # Has missing values, so only fetch stochastic elements using mask
+                        self._funs_to_tally[object.__name__] = object.get_stoch_value
+                except AttributeError:
+                    # Not a stochastic object, so no mask
+                    self._funs_to_tally[object.__name__] = object.get_value
             else:
                 object.trace = no_trace.Trace(object.__name__)
 
@@ -365,20 +549,16 @@ class Sampler(Model):
 
                 self.db = module.Database(**self._db_args)
             elif db in database.__modules__:
-                raise ImportError, \
-                    'Database backend `%s` is not properly installed. Please see the documentation for instructions.' % db
+                raise ImportError(\
+                    'Database backend `%s` is not properly installed. Please see the documentation for instructions.' % db)
             else:
-                raise AttributeError, \
-                    'Database backend `%s` is not defined in pymc.database.'%db
+                raise AttributeError(\
+                    'Database backend `%s` is not defined in pymc.database.'%db)
         elif isinstance(db, database.base.Database):
             self.db = db
             self.restore_sampler_state()
-        else:   # What is this for? DH. If it's a user defined backend, it doesn't initialize a Database.
+        else:   # What is this for? DH.
             self.db = db.Database(**self._db_args)
-
-        # Assign Trace instances to tallyable objects.
-        self.db.connect_model(self)
-
 
     def pause(self):
         """Pause the sampler. Sampling can be resumed by calling `icontinue`.
@@ -386,7 +566,7 @@ class Sampler(Model):
         self.status = 'paused'
         # The _loop method will react to 'paused' status and stop looping.
         if hasattr(self, '_sampling_thread') and self._sampling_thread.isAlive():
-            print 'Waiting for current iteration to finish...'
+            print_('Waiting for current iteration to finish...')
             while self._sampling_thread.isAlive():
                 sleep(.1)
 
@@ -395,12 +575,12 @@ class Sampler(Model):
         self.status = 'halt'
         # The _halt method is called by _loop.
         if hasattr(self, '_sampling_thread') and self._sampling_thread.isAlive():
-            print 'Waiting for current iteration to finish...'
+            print_('Waiting for current iteration to finish...')
             while self._sampling_thread.isAlive():
                 sleep(.1)
 
     def _halt(self):
-        print 'Halting at iteration ', self._current_iter, ' of ', self._iter
+        print_('Halting at iteration ', self._current_iter, ' of ', self._iter)
         self.db.truncate(self._cur_trace_index)
         self._finalize()
 
@@ -414,13 +594,13 @@ class Sampler(Model):
        Records the value of all tracing variables.
        """
        if self.verbose > 2:
-           print self.__name__ + ' tallying.'
+           print_(self.__name__ + ' tallying.')
        if self._cur_trace_index < self.max_trace_length:
            self.db.tally()
 
        self._cur_trace_index += 1
        if self.verbose > 2:
-           print self.__name__ + ' done tallying.'
+           print_(self.__name__ + ' done tallying.')
 
     def commit(self):
         """
@@ -436,6 +616,7 @@ class Sampler(Model):
         """
         self._exc_info = None
         out = kwds.pop('out',  sys.stdout)
+        kwds['progress_bar'] = False
         def samp_targ(*args, **kwds):
             try:
                 self.sample(*args, **kwds)
@@ -452,7 +633,7 @@ class Sampler(Model):
         Restarts thread in interactive mode
         """
         if self.status != 'paused':
-            print "No sampling to continue. Please initiate sampling with isample."
+            print_("No sampling to continue. Please initiate sampling with isample.")
             return
 
         def sample_and_finalize():
@@ -481,13 +662,13 @@ class Sampler(Model):
                       own risk.
         """
 
-        print >> out, """==============
+        print_("""==============
  PyMC console
 ==============
 
         PyMC is now sampling. Use the following commands to query or pause the sampler.
-        """
-        print >> out, cmds
+        """, file=out)
+        print_(cmds, file=out)
 
         prompt = True
         try:
@@ -499,11 +680,11 @@ class Sampler(Model):
 
                     if self._exc_info is not None:
                         a,b,c = self._exc_info
-                        raise a, b, c
+                        reraise(a, b, c)
 
                     cmd = utils.getInput().strip()
                     if cmd == 'i':
-                        print >> out,  'Current iteration: ', self._current_iter
+                        print_('Current iteration: %i of %i' % (self._current_iter, self._iter), file=out)
                         prompt = True
                     elif cmd == 'p':
                         self.status = 'paused'
@@ -519,8 +700,8 @@ class Sampler(Model):
                     elif cmd == '':
                         prompt = False
                     else:
-                        print >> out, 'Unknown command: ', cmd
-                        print >> out, cmds
+                        print_('Unknown command: ', cmd, file=out)
+                        print_(cmds, file=out)
                         prompt = True
 
         except KeyboardInterrupt:
@@ -529,14 +710,14 @@ class Sampler(Model):
 
 
         if self.status == 'ready':
-            print >> out, "Sampling terminated successfully."
+            print_("Sampling terminated successfully.", file=out)
         else:
-            print >> out, 'Waiting for current iteration to finish...'
+            print_('Waiting for current iteration to finish...', file=out)
             while self._sampling_thread.isAlive():
                 sleep(.1)
-            print >> out, 'Exiting interactive prompt...'
+            print_('Exiting interactive prompt...', file=out)
             if self.status == 'paused':
-                print >> out, 'Call icontinue method to continue, or call halt method to truncate traces and stop.'
+                print_('Call icontinue method to continue, or call halt method to truncate traces and stop.', file=out)
 
 
     def get_state(self):
@@ -561,8 +742,8 @@ class Sampler(Model):
         try:
             self.db.savestate(self.get_state())
         except:
-            print 'Warning, unable to save state.'
-            print 'Error message:'
+            print_('Warning, unable to save state.')
+            print_('Error message:')
             traceback.print_exc()
 
     def restore_sampler_state(self):
@@ -583,25 +764,28 @@ class Sampler(Model):
             try:
                 sm.value = stoch_state[sm.__name__]
             except:
-                warnings.warn(\
-    'Failed to restore state of stochastic %s from %s backend'%(sm.__name__, self.db.__name__), exceptions.UserWarning)
-                #print 'Error message:'
+                warnings.warn('Failed to restore state of stochastic %s from %s backend'%(sm.__name__, self.db.__name__))
+                #print_('Error message:')
                 #traceback.print_exc()
 
 
-    def remember(self, trace_index = None):
+    def remember(self, chain=-1, trace_index = None):
         """
-        remember(trace_index = randint(trace length to date))
+        remember(chain=-1, trace_index = randint(trace length to date))
 
         Sets the value of all tracing variables to a value recorded in
         their traces.
         """
         if trace_index is None:
-            trace_index = randint(self.cur_trace_index)
+            trace_index = randint(self._cur_trace_index)
 
         for variable in self._variables_to_tally:
             if isinstance(variable, Stochastic):
-                variable.value = variable.trace()[trace_index]
+                try:
+                    variable.value = self.trace(variable.__name__, chain=chain)[trace_index]
+                except:
+                    cls, inst, tb = sys.exc_info()
+                    warnings.warn('Unable to remember value of variable %s. Original error: \n\n%s: %s'%(variable,cls.__name__,inst.message))
 
     def trace(self, name, chain=-1):
         """Return the trace of a tallyable object stored in the database.
@@ -618,7 +802,7 @@ class Sampler(Model):
         elif isinstance(name, Variable):
             return self.db.trace(name.__name__, chain)
         else:
-            raise ValueError, 'Name argument must be string or Variable, got %s.'%name
+            raise ValueError('Name argument must be string or Variable, got %s.'%name)
 
     def _get_deviance(self):
         return self._sum_deviance()
@@ -629,6 +813,6 @@ def check_valid_object_name(sequence):
     names = []
     for o in sequence:
         if o.__name__ in names:
-            raise ValueError, 'A tallyable PyMC object called %s already exists. This will cause problems for some database backends.'%o.__name__
+            raise ValueError('A tallyable PyMC object called %s already exists. This will cause problems for some database backends.'%o.__name__)
         else:
             names.append(o.__name__)

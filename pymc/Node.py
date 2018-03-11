@@ -9,6 +9,15 @@ __author__ = 'Anand Patil, anand.prabhakar.patil@gmail.com'
 import os, sys, pdb
 import numpy as np
 import types
+from . import six
+print_ = six.print_
+
+try:
+    from types import UnboundMethodType
+except ImportError:
+    # On Python 3, unbound methods are just functions.
+    def UnboundMethodType(func, inst, cls):
+        return func
 
 
 def logp_of_set(s):
@@ -17,46 +26,37 @@ def logp_of_set(s):
     for obj in s:
         try:
             logp += obj.logp
+        except ZeroProbability:
+            raise
         except:
-            cls, inst, tb = sys.exc_info()
-            if cls is ZeroProbability:
-                raise cls, inst, tb
-            elif exc is None:
-                exc = (cls, inst, tb)
+            if exc is None:
+                exc = sys.exc_info()
     if exc is None:
         return logp
     else:
-        raise exc[0], exc[1], exc[2]
+        six.reraise(*exc)
 
-
-def batchsd(trace, batches=5):
+def logp_gradient_of_set(variable_set, calculation_set = None):
     """
-    Calculates the simulation standard error, accounting for non-independent
-    samples. The trace is divided into batches, and the standard deviation of
-    the batch means is calculated.
+    Calculates the gradient of the joint log posterior with respect to all the variables in variable_set.
+    Calculation of the log posterior is restricted to the variables in calculation_set.
+
+    Returns a dictionary of the gradients.
     """
 
-    if len(np.shape(trace)) > 1:
+    logp_gradients = {}
+    for variable in variable_set:
+        logp_gradients[variable] = logp_gradient(variable, calculation_set)
 
-        dims = np.shape(trace)
-        #ttrace = np.transpose(np.reshape(trace, (dims[0], sum(dims[1:]))))
-        ttrace = np.transpose([t.ravel() for t in trace])
+    return logp_gradients
 
-        return np.reshape([batchsd(t, batches) for t in ttrace], dims[1:])
+def logp_gradient(variable, calculation_set = None):
+    """
+    Calculates the gradient of the joint log posterior with respect to variable.
+    Calculation of the log posterior is restricted to the variables in calculation_set.
+    """
+    return variable.logp_partial_gradient(variable, calculation_set) + sum([child.logp_partial_gradient(variable, calculation_set) for child in variable.children] )
 
-    else:
-        if batches == 1: return np.std(trace)/np.sqrt(len(trace))
-
-        try:
-            batched_traces = np.resize(trace, (batches, len(trace)/batches))
-        except ValueError:
-            # If batches do not divide evenly, trim excess samples
-            resid = len(trace) % batches
-            batched_traces = np.resize(trace[:-resid], (batches, len(trace)/batches))
-
-        means = np.mean(batched_traces, 1)
-
-        return np.std(means)/np.sqrt(batches)
 
 class ZeroProbability(ValueError):
     "Log-probability is undefined or negative infinity"
@@ -101,10 +101,12 @@ class Node(object):
          The base class for :class:`Stochastics` and :class:`Deterministics`.
 
     """
-    def __init__(self, doc, name, parents, cache_depth, verbose=None):
+    def __init__(self, doc, name, parents, cache_depth, verbose=-1):
 
         # Name and docstrings
         self.__doc__ = doc
+        if not isinstance(name, str):
+            raise ValueError('The name argument must be a string, but received %s.'%name)
         self.__name__ = name
 
         # Level of feedback verbosity
@@ -123,9 +125,10 @@ class Node(object):
     def _set_parents(self, new_parents):
         # Define parents of this object
 
+        # THERE DOES NOT APPEAR TO BE A detach_children() METHOD IN CLASS
         # Remove from current parents
-        if hasattr(self,'_parents'):
-            self._parents.detach_children()
+        # if hasattr(self,'_parents'):
+        #             self._parents.detach_children()
 
         # Specify new parents
         self._parents = self.ParentDict(regular_dict = new_parents, owner = self)
@@ -184,10 +187,13 @@ class Variable(Node):
     :SeeAlso:
       Stochastic, Deterministic, Potential, Node
     """
-    def __init__(self, doc, name, parents, cache_depth, trace=False, dtype=None, plot=None, verbose=None):
+
+    __array_priority__ = 10
+
+    def __init__(self, doc, name, parents, cache_depth, trace=False, dtype=None, plot=None, verbose=-1):
 
         self.dtype=dtype
-        self.trace=trace
+        self.keep_trace=trace
         self._plot=plot
         self.children = set()
         self.extended_children = set()
@@ -213,33 +219,120 @@ class Variable(Node):
 
     plot = property(_get_plot, _set_plot, doc='A flag indicating whether self should be plotted.')
 
-    def stats(self, alpha=0.05, start=0, batches=100):
+    def stats(self, alpha=0.05, start=0, batches=100, chain=None, quantiles=(2.5, 25, 50, 75, 97.5)):
         """
         Generate posterior statistics for node.
+
+        :Parameters:
+        alpha : float
+          The alpha level for generating posterior intervals. Defaults to
+          0.05.
+
+        start : int
+          The starting index from which to summarize (each) chain. Defaults
+          to zero.
+
+        batches : int
+          Batch size for calculating standard deviation for non-independent
+          samples. Defaults to 100.
+
+        chain : int
+          The index for which chain to summarize. Defaults to None (all
+          chains).
+
+        quantiles : tuple or list
+          The desired quantiles to be calculated. Defaults to (2.5, 25, 50, 75, 97.5).
         """
-        from utils import hpd, quantiles
-        from numpy import sqrt
-
-        try:
-            trace = np.squeeze(np.array(self.trace(), float)[start:])
-
-            n = len(trace)
-            if not n:
-                print 'Cannot generate statistics for zero-length trace in', self.__name__
-                return
+        return self.trace.stats(alpha=alpha, start=start, batches=batches, 
+            chain=chain, quantiles=quantiles)
 
 
-            return {
-                'n': n,
-                'standard deviation': trace.std(0),
-                'mean': trace.mean(0),
-                '%s%s HPD interval' % (int(100*(1-alpha)),'%'): hpd(trace, alpha),
-                'mc error': batchsd(trace, batches),
-                'quantiles': quantiles(trace)
-            }
-        except:
-            print 'Could not generate output statistics for', self.__name__
-            return
+    def summary(self, alpha=0.05, start=0, batches=100, chain=None, roundto=3):
+        """
+        Generate a pretty-printed summary of the node.
+
+        :Parameters:
+        alpha : float
+          The alpha level for generating posterior intervals. Defaults to
+          0.05.
+
+        start : int
+          The starting index from which to summarize (each) chain. Defaults
+          to zero.
+
+        batches : int
+          Batch size for calculating standard deviation for non-independent
+          samples. Defaults to 100.
+
+        chain : int
+          The index for which chain to summarize. Defaults to None (all
+          chains).
+
+        roundto : int
+          The number of digits to round posterior statistics.
+        """
+
+        # Calculate statistics for Node
+        statdict = self.stats(alpha=alpha, start=start, batches=batches, chain=chain)
+        size = np.size(statdict['mean'])
+
+        print_('\n%s:' % self.__name__)
+        print_(' ')
+
+        # Initialize buffer
+        buffer = []
+
+        # Title
+        # buffer += ['Summary statistics']
+        # buffer += ['%s' % '='*len(buffer[-1])]
+        # buffer += ['']*2
+
+        # Index to interval label
+        iindex = [key.split()[-1] for key in statdict.keys()].index('interval')
+        interval = statdict.keys()[iindex]
+
+        # Print basic stats
+        buffer += ['Mean             SD               MC Error        %s' % interval]
+        buffer += ['-'*len(buffer[-1])]
+
+        indices = range(size)
+        if len(indices)==1:
+            indices = [None]
+
+        for index in indices:
+            # Extract statistics and convert to string
+            m = str(round(statdict['mean'][index], roundto))
+            sd = str(round(statdict['standard deviation'][index], roundto))
+            mce = str(round(statdict['mc error'][index], roundto))
+            hpd = str(statdict[interval][index].squeeze().round(roundto))
+
+            # Build up string buffer of values
+            valstr = m
+            valstr += ' '*(17-len(m)) + sd
+            valstr += ' '*(17-len(sd)) + mce
+            valstr += ' '*(len(buffer[-1]) - len(valstr) - len(hpd)) + hpd
+
+            buffer += [valstr]
+
+        buffer += ['']*2
+
+        # Print quantiles
+        buffer += ['Posterior quantiles:','']
+
+        buffer += ['2.5             25              50              75             97.5']
+        buffer += [' |---------------|===============|===============|---------------|']
+
+        for index in indices:
+            quantile_str = ''
+            for i,q in enumerate((2.5, 25, 50, 75, 97.5)):
+                qstr = str(round(statdict['quantiles'][q][index], roundto))
+                quantile_str += qstr + ' '*(17-i-len(qstr))
+            buffer += [quantile_str.strip()]
+
+        buffer += ['']
+
+        print_('\t' + '\n\t'.join(buffer))
+
 
 ContainerRegistry = []
 
@@ -248,13 +341,13 @@ class ContainerMeta(type):
         type.__init__(cls, name, bases, dict)
 
         def change_method(self, *args, **kwargs):
-            raise NotImplementedError, name + ' instances cannot be changed.'
+            raise NotImplementedError(name + ' instances cannot be changed.')
 
         if cls.register:
             ContainerRegistry.append((cls, cls.containing_classes))
 
             for meth in cls.change_methods:
-                setattr(cls, meth, types.UnboundMethodType(change_method, None, cls))
+                setattr(cls, meth, UnboundMethodType(change_method, None, cls))
         cls.register=False
 
 
@@ -266,7 +359,6 @@ class ContainerBase(object):
       ListContainer, SetContainer, DictContainer, TupleContainer, ArrayContainer
     """
     register = False
-    __metaclass__ = ContainerMeta
     change_methods = []
     containing_classes = []
 
@@ -300,44 +392,43 @@ class ContainerBase(object):
     # Define log-probability property
     logp = property(_get_logp, doc='The summed log-probability of all stochastic variables (data\nor otherwise) and factor potentials in self.')
 
+ContainerBase = six.with_metaclass(ContainerMeta, ContainerBase)
+
 StochasticRegistry = []
 class StochasticMeta(type):
     def __init__(cls, name, bases, dict):
         type.__init__(cls, name, bases, dict)
         StochasticRegistry.append(cls)
-class StochasticBase(Variable):
+class StochasticBase(six.with_metaclass(StochasticMeta, Variable)):
     """
     Abstract base class.
 
     :SeeAlso:
       Stochastic, Variable
     """
-    __metaclass__ = StochasticMeta
 
 DeterministicRegistry = []
 class DeterministicMeta(type):
     def __init__(cls, name, bases, dict):
         type.__init__(cls, name, bases, dict)
         DeterministicRegistry.append(cls)
-class DeterministicBase(Variable):
+class DeterministicBase(six.with_metaclass(DeterministicMeta, Variable)):
     """
     Abstract base class.
 
     :SeeAlso:
       Deterministic, Variable
     """
-    __metaclass__ = DeterministicMeta
 
 PotentialRegistry = []
 class PotentialMeta(type):
     def __init__(cls, name, bases, dict):
         type.__init__(cls, name, bases, dict)
         PotentialRegistry.append(cls)
-class PotentialBase(Node):
+class PotentialBase(six.with_metaclass(PotentialMeta, Node)):
     """
     Abstract base class.
 
     :SeeAlso:
       Potential, Variable
     """
-    __metaclass__ = PotentialMeta

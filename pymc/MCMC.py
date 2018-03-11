@@ -4,13 +4,17 @@ Class MCMC, which fits probability models using Markov Chain Monte Carlo, is def
 
 __all__ = ['MCMC']
 
-from Model import Sampler
-from Node import ZeroProbability
-from StepMethods import StepMethodRegistry, assign_method, DrawFromPrior
-from distributions import absolute_loss, squared_loss, chi_square_loss
+from .Model import Sampler
+from .StepMethods import StepMethodRegistry, assign_method, DrawFromPrior
+from .distributions import absolute_loss, squared_loss, chi_square_loss
 import sys, time, pdb
 import numpy as np
-from utils import crawl_dataless
+from .utils import crawl_dataless
+
+from .six import print_
+
+# from .progressbar import ProgressBar, Percentage, Bar, ETA, Iterations
+from progressbar import ProgressBar
 
 GuiInterrupt = 'Computation halt'
 Paused = 'Computation paused'
@@ -70,7 +74,8 @@ class MCMC(Sampler):
         for s in self.stochastics:
             self.step_method_dict[s] = []
 
-        self._state = ['status', '_current_iter', '_iter', '_tune_interval', '_burn', '_thin']
+        self._state = ['status', '_current_iter', '_iter', '_tune_interval', '_burn',
+                       '_thin', '_tuned_count', '_tune_throughout', '_burn_till_tuned']
 
     def use_step_method(self, step_method_class, *args, **kwds):
         """
@@ -87,15 +92,32 @@ class MCMC(Sampler):
 
         new_method = step_method_class(*args, **kwds)
         if self.verbose > 1:
-            print 'Using step method %s. Stochastics: ' % step_method_class.__name__
+            print_('Using step method %s. Stochastics: ' % step_method_class.__name__)
+
         for s in new_method.stochastics:
             self.step_method_dict[s].append(new_method)
             if self.verbose > 1:
-                print '\t'+s.__name__
+                print_('\t'+s.__name__)
+        if self._sm_assigned:
+            self.step_methods.add(new_method)
 
         setattr(new_method, '_model', self)
 
-    def assign_step_methods(self):
+    def remove_step_method(self, step_method):
+        """
+        Removes a step method.
+        """
+        try:
+            for s in step_method.stochastics:
+                self.step_method_dict[s].remove(step_method)
+            if hasattr(self, "step_methods"):
+                self.step_methods.discard(step_method)
+            self._sm_assigned = False
+        except AttributeError:
+            for sm in step_method:
+                self.remove_step_method(sm)
+
+    def assign_step_methods(self, verbose=-1, draw_from_prior_when_possible = True):
         """
         Make sure every stochastic variable has a step method. If not,
         assign a step method from the registry.
@@ -103,31 +125,33 @@ class MCMC(Sampler):
 
         if not self._sm_assigned:
 
-            # Assign dataless stepper first
-            last_gen = set([])
-            for s in self.stochastics:
-                if s._random is not None:
-                    if len(s.extended_children)==0:
-                        last_gen.add(s)
+            if draw_from_prior_when_possible:
+                # Assign dataless stepper first
+                last_gen = set([])
+                for s in self.stochastics - self.observed_stochastics:
+                    if s._random is not None:
+                        if len(s.extended_children)==0:
+                            last_gen.add(s)
 
-            dataless, dataless_gens = crawl_dataless(set(last_gen), [last_gen])
-            if len(dataless):
-                new_method = DrawFromPrior(dataless, dataless_gens[::-1])
-                setattr(new_method, '_model', self)
-                for d in dataless:
-                    if not d.observed:
-                        self.step_method_dict[d].append(new_method)
-                        if self.verbose > 1:
-                            print 'Assigning step method %s to stochastic %s' % (new_method.__class__.__name__, d.__name__)
+
+                dataless, dataless_gens = crawl_dataless(set(last_gen), [last_gen])
+                if len(dataless):
+                    new_method = DrawFromPrior(dataless, dataless_gens[::-1], verbose=verbose)
+                    setattr(new_method, '_model', self)
+                    for d in dataless:
+                        if not d.observed:
+                            self.step_method_dict[d].append(new_method)
+                            if self.verbose > 1:
+                                print_('Assigning step method %s to stochastic %s' % (new_method.__class__.__name__, d.__name__))
 
             for s in self.stochastics:
                 # If not handled by any step method, make it a new step method using the registry
                 if len(self.step_method_dict[s])==0:
-                    new_method = assign_method(s)
+                    new_method = assign_method(s, verbose=verbose)
                     setattr(new_method, '_model', self)
                     self.step_method_dict[s].append(new_method)
                     if self.verbose > 1:
-                        print 'Assigning step method %s to stochastic %s' % (new_method.__class__.__name__, s.__name__)
+                        print_('Assigning step method %s to stochastic %s' % (new_method.__class__.__name__, s.__name__))
 
             self.step_methods = set()
             for s in self.stochastics:
@@ -138,12 +162,21 @@ class MCMC(Sampler):
                     for name in sm._tuning_info:
                         self._funs_to_tally[sm._id+'_'+name] = lambda name=name, sm=sm: getattr(sm, name)
 
+        else:
+            # Change verbosity for step methods
+            for sm_key in self.step_method_dict:
+                for sm in self.step_method_dict[sm_key]:
+                    sm.verbose = verbose
+
         self.restore_sm_state()
         self._sm_assigned = True
 
-    def sample(self, iter, burn=0, thin=1, tune_interval=1000, tune_throughout=True, save_interval=None, verbose=0):
+    def sample(self, iter, burn=0, thin=1, tune_interval=1000, tune_throughout=True,
+               save_interval=None, burn_till_tuned=False, stop_tuning_after=5,
+               verbose=0, progress_bar=True):
+
         """
-        sample(iter, burn, thin, tune_interval, tune_throughout, save_interval, verbose)
+        sample(iter, burn, thin, tune_interval, tune_throughout, save_interval, verbose, progress_bar)
 
         Initialize traces, run sampling loop, clean up afterward. Calls _loop.
 
@@ -162,35 +195,63 @@ class MCMC(Sampler):
           - save_interval : int or None
             If given, the model state will be saved at intervals of this many iterations
           - verbose : boolean
+          - progress_bar : boolean
+            Display progress bar while sampling.
+          - burn_till_tuned: boolean
+            If True the Sampler would burn samples until all step methods are tuned.
+            A tuned step methods is one that was not tuned for the last `stop_tuning_after` tuning intervals.
+            The burn-in phase will have a minimum of 'burn' iterations but could be longer if
+            tuning is needed. After the phase is done the sampler will run for another 
+            (iter - burn) iterations, and will tally the samples according to the 'thin' argument.
+            This means that the total number of iteration is update throughout the sampling
+            procedure.
+            If burn_till_tuned is True it also overrides the tune_thorughout argument, so no step method
+            will be tuned when sample are being tallied.
+          - stop_tuning_adfter: int
+            the number of untuned successive tuning interval needed to be reach in order for
+            the burn-in phase to be done (If burn_till_tuned is True).
         """
 
-        self.assign_step_methods()
+        self.assign_step_methods(verbose=verbose)
 
-        if burn >= iter:
-            raise ValueError, 'Burn interval must be smaller than specified number of iterations.'
+        if burn > iter:
+            raise ValueError('Burn interval cannot be larger than specified number of iterations.')
+
+        self._n_tally = int(iter) - int(burn)
+        if burn_till_tuned:
+            tune_throughout = False
+            if verbose > 0:
+                print "burn_til_tuned is True. tune_throughout is set to False"
+            burn = int(max(burn, stop_tuning_after * tune_interval))
+            iter = self._n_tally + burn
+
         self._iter = int(iter)
         self._burn = int(burn)
         self._thin = int(thin)
         self._tune_interval = int(tune_interval)
         self._tune_throughout = tune_throughout
+        self._burn_till_tuned = burn_till_tuned
         self._save_interval = save_interval
 
-        length = int(np.ceil((1.0*iter-burn)/thin))
+        length = max(int(np.floor((1.0*iter-burn)/thin)), 1)
         self.max_trace_length = length
 
         # Flags for tuning
         self._tuning = True
         self._tuned_count = 0
 
+        # Progress bar
+        self.pbar = None
+        if not verbose and progress_bar:
+            self.pbar = ProgressBar(self._iter)
+
+        # Run sampler
         Sampler.sample(self, iter, length, verbose)
 
     def _loop(self):
         # Set status flag
         self.status='running'
-
-        # Record start time
-        start = time.time()
-
+        
         try:
             while self._current_iter < self._iter and not self.status == 'halt':
                 if self.status == 'paused':
@@ -198,25 +259,35 @@ class MCMC(Sampler):
 
                 i = self._current_iter
 
+                # Update progress bar
+                if not (i+1) % 100 and self.pbar:
+                    self.pbar.animate(i+1)
+
                 # Tune at interval
                 if i and not (i % self._tune_interval) and self._tuning:
                     self.tune()
 
+                    #update _burn and _iter if needed
+                    if self._burn_till_tuned and (self._tuned_count == 0):
+                        new_burn = self._current_iter + int(self._stop_tuning_after * self._tune_interval)
+                        self._burn =  max(new_burn, self._burn);
+                        self._iter = self._burn + self._n_tally
+
+                # Manage burn-in
                 if i == self._burn:
                     if self.verbose>0:
-                        print 'Burn-in interval complete'
+                        print_('\nBurn-in interval complete')
                     if not self._tune_throughout:
-                        if self.verbose > 0:
-                            print 'Stopping tuning due to burn-in being complete.'
                         self._tuning = False
 
                 # Tell all the step methods to take a step
                 for step_method in self.step_methods:
                     if self.verbose > 2:
-                        print 'Step method %s stepping' % step_method._id
+                        print_('Step method %s stepping' % step_method._id)
                     # Step the step method
                     step_method.step()
 
+                # Record sample to trace, if appropriate
                 if i % self._thin == 0 and i >= self._burn:
                     self.tally()
 
@@ -224,23 +295,23 @@ class MCMC(Sampler):
                     if i % self._save_interval==0:
                         self.save_state()
 
-                if not i % 10000 and i and self.verbose > 0:
-                    per_step = (time.time() - start)/i
-                    remaining = self._iter - i
-                    time_left = remaining * per_step
-
-                    print "Iteration %i of %i (%i:%02d:%02d remaining)" % (i, self._iter, time_left/3600, (time_left%3600)/60, (time_left%60))
-
+                # Periodically commit samples to backend
                 if not i % 1000:
                     self.commit()
 
+                # Increment interation
                 self._current_iter += 1
 
         except KeyboardInterrupt:
             self.status='halt'
+        finally:
+            # Stop progress bar
+            if self.pbar:
+                self.pbar.animate(self._iter)
 
         if self.status == 'halt':
             self._halt()
+
 
     def tune(self):
         """
@@ -256,19 +327,19 @@ class MCMC(Sampler):
         #     return
 
         if self.verbose > 0:
-            print '\tTuning at iteration', self._current_iter
+            print_('\tTuning at iteration', self._current_iter)
 
         # Initialize counter for number of tuning stochastics
         tuning_count = 0
 
         for step_method in self.step_methods:
             verbose = self.verbose
-            if step_method.verbose is not None:
+            if step_method.verbose > -1:
                 verbose = step_method.verbose
             # Tune step methods
             tuning_count += step_method.tune(verbose=self.verbose)
             if verbose > 1:
-                print '\t\tTuning step method %s, returned %i\n' %(step_method._id, tuning_count)
+                print_('\t\tTuning step method %s, returned %i\n' %(step_method._id, tuning_count))
                 sys.stdout.flush()
 
         if not self._tune_throughout:
@@ -279,9 +350,10 @@ class MCMC(Sampler):
                 # Otherwise re-initialize count
                 self._tuned_count = 0
 
-            # 5 consecutive clean intervals removed tuning
-            if self._tuned_count == 5:
-                if self.verbose > 0: print 'Finished tuning'
+            # n consecutive clean intervals removed tuning
+            # n is equal to self._stop_tuning_after
+            if self._tuned_count ==  self._stop_tuning_after:
+                if self.verbose > 0: print_('\nFinished tuning')
                 self._tuning = False
 
 
@@ -315,25 +387,31 @@ class MCMC(Sampler):
             for sm in self.step_methods:
                 sm.__dict__.update(sm_state.get(sm._id, {}))
 
-    def dic(self):
+    def _calc_dic(self):
         """Calculates deviance information Criterion"""
 
         # Find mean deviance
-        mean_deviance = np.mean(self.deviance.trace(), axis=0)
+        mean_deviance = np.mean(self.db.trace('deviance')(), axis=0)
 
         # Set values of all parameters to their mean
         for stochastic in self.stochastics:
 
             # Calculate mean of paramter
-            mean_value = np.mean(stochastic.trace(), axis=0)
+            try:
+                mean_value = np.mean(self.db.trace(stochastic.__name__)(), axis=0)
 
-            # Set current value to mean
-            stochastic.value = mean_value
+                # Set current value to mean
+                stochastic.value = mean_value
 
-        deviance_at_mean = self._calc_deviance()
+            except KeyError:
+                print_("No trace available for %s. DIC value may not be valid." % stochastic.__name__)
+
         # Return twice deviance minus deviance at means
-        return 2*mean_deviance - deviance_at_mean
+        return 2*mean_deviance - self.deviance
 
-
+    # Make dic a property
+    def _get_dic(self):
+        return self._calc_dic()
+    dic = property(_get_dic)
 
 

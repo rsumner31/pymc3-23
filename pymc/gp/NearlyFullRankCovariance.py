@@ -6,18 +6,20 @@ __all__ = ['NearlyFullRankCovariance']
 
 from numpy import *
 from numpy.linalg import cholesky, LinAlgError
-from GPutils import regularize_array, trisolve
-from linalg_utils import diag_call
-from incomplete_chol import ichol_full
-from Covariance import Covariance
+from .GPutils import regularize_array, trisolve
+from .linalg_utils import diag_call
+from .incomplete_chol import ichol_full
+from .Covariance import Covariance
 
+from pymc import six
+xrange = six.moves.xrange
 
 class NearlyFullRankCovariance(Covariance):
 
     """
     C=NearlyFullRankCovariance(eval_fun, relative_precision, **params)
 
-    Valued as a GP covariance. Good for situations where self's evaluation
+    A GP covariance. Good for situations where self's evaluation
     on observation locations is nearly full-rank, but not quite. Evaluation
     of the matrix can be parallelized, but Cholesky decompositions are done
     using a serial incomplete algorithm.
@@ -42,12 +44,10 @@ class NearlyFullRankCovariance(Covariance):
     def cholesky(self, x, apply_pivot = True, observed=True, nugget=None, regularize=True, rank_limit=0):
         """
 
-        U = C.cholesky(x[, observed=True, nugget=None])
-
+        U = C.cholesky(x[, observed=True, nugget=None, rank_limit=0])
 
         {'pivots': piv, 'U': U} = \
         C.cholesky(x, apply_pivot = False[, observed=True, nugget=None])
-
 
         Computes incomplete Cholesky factorization of self(x,x).
 
@@ -69,9 +69,12 @@ class NearlyFullRankCovariance(Covariance):
 
             -   `nugget`: The 'nugget' parameter, which will essentially be
                 added to the diagonal of C(x,x) before Cholesky factorizing.
+
+            -   `rank_limit`: If rank_limit > 0, the factor will have at most 
+                rank_limit rows.
         """
         if rank_limit > 0:
-            raise ValueError, 'NearlyFullRankCovariance does not accept a rank_limit argument. Use Covariance instead.'
+            raise ValueError('NearlyFullRankCovariance does not accept a rank_limit argument. Use Covariance instead.')
 
         if regularize:
             x=regularize_array(x)
@@ -81,7 +84,10 @@ class NearlyFullRankCovariance(Covariance):
 
         # Special fast version for single points.
         if N_new==1:
-            U=asmatrix(sqrt(self.__call__(x, regularize = False, observed = observed)))
+            V = self.__call__(x, regularize = False, observed = observed)
+            if nugget is not None:
+                V += nugget
+            U=asmatrix(sqrt(V))
             # print U
             if not apply_pivot:
                 return {'pivots': array([0]), 'U': U}
@@ -103,7 +109,7 @@ class NearlyFullRankCovariance(Covariance):
 
         # Arrange output matrix and return.
         if m<0:
-            raise ValueError, "Matrix does not appear to be positive semidefinite"
+            raise ValueError("Matrix does not appear to be positive semidefinite")
 
         if not apply_pivot:
             # Useful for self.observe and Realization.__call__. U is upper triangular.
@@ -117,11 +123,11 @@ class NearlyFullRankCovariance(Covariance):
     def continue_cholesky(self, x, x_old, chol_dict_old, apply_pivot = True, observed=True, nugget=None, regularize=True, assume_full_rank=False, rank_limit=0):
         """
 
-        U = C.continue_cholesky(x, x_old, chol_dict_old[, observed=True, nugget=None])
+        U = C.continue_cholesky(x, x_old, chol_dict_old[, observed=True, nugget=None,
+                rank_limit=0])
 
 
-        {'pivots': piv, 'U': U} = \
-        C.cholesky(x, x_old, chol_dict_old, apply_pivot = False[, observed=True, nugget=None])
+        Returns {'pivots': piv, 'U': U}
 
 
         Computes incomplete Cholesky factorization of self(z,z). Here z is the
@@ -152,15 +158,18 @@ class NearlyFullRankCovariance(Covariance):
 
             -   `nugget`: The 'nugget' parameter, which will essentially be
                 added to the diagonal of C(x,x) before Cholesky factorizing.
+                
+            -   `rank_limit`: If rank_limit > 0, the factor will have at most 
+                rank_limit rows.
         """
         if regularize:
             x=regularize_array(x)
-            
-        if rank_limit > 0:
-            raise ValueError, 'NearlyFullRankCovariance does not accept a rank_limit argument. Use Covariance instead.'
 
         if rank_limit > 0:
-            raise ValueError, 'NearlyFullRankCovariance does not accept a rank_limit argument. Use Covariance instead.'
+            raise ValueError('NearlyFullRankCovariance does not accept a rank_limit argument. Use Covariance instead.')
+
+        if rank_limit > 0:
+            raise ValueError('NearlyFullRankCovariance does not accept a rank_limit argument. Use Covariance instead.')
 
         # Concatenation of the old points and new points.
         xtot = vstack((x_old,x))
@@ -216,11 +225,14 @@ class NearlyFullRankCovariance(Covariance):
 
         # Arrange output matrix and return.
         if m<0:
-            raise ValueError, 'Matrix does not appear positive semidefinite.'
+            raise ValueError('Matrix does not appear positive semidefinite.')
 
         if not apply_pivot:
             # Useful for self.observe. U is upper triangular.
-            return {'pivots': piv, 'U': U}
+            if assume_full_rank:
+                return {'pivots':piv,'U':U,'C_eval':C_new,'U_new':U_new}
+            else:
+                return {'pivots': piv, 'U': U}
 
         else:
             # Useful for the user. U.T * U = C(x,x).

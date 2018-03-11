@@ -37,8 +37,8 @@ and the database relays the finalize call to each Trace object.
 To get the samples from the database, the Sampler class provides a trace method
 ``trace(self, name, chain=-1)`` which first sets the db attribute
 _default_chain to chain and returns the trace instance, so that calling
-S.trace('e')[:] will return all samples from the last chain. One potential
-problem with this is that user could simply do ``S.trace('e') = 5`` and
+S.trace('early_mean')[:] will return all samples from the last chain. One potential
+problem with this is that user could simply do ``S.trace('early_mean') = 5`` and
 erase the Trace object. A read-only dictionary-like class could solve
 that problem.
 
@@ -46,10 +46,15 @@ Some backends require being closed before saving the results. This needs to be
 done explicitly by the user.
 """
 import pymc
+import numpy as np
 import types
-import sys, traceback
+import sys, traceback, warnings
 import copy
 __all__=['Trace', 'Database']
+
+from pymc import six
+from pymc import utils
+from pymc.six import print_
 
 class Trace(object):
     """Base class for Trace objects.
@@ -106,7 +111,7 @@ class Trace(object):
           - chain (int): The index of the chain to fetch. If None, return all chains.
           - slicing: A slice, overriding burn and thin assignement.
         """
-        raise AttributeError, self.name + " has no trace"
+        warnings.warn('Use Sampler.trace method instead.', DeprecationWarning)
 
 
     # By convention, the __call__ method is assigned to gettrace.
@@ -119,7 +124,7 @@ class Trace(object):
         if type(i) == types.SliceType:
             return self.gettrace(slicing=i, chain=self._chain)
         else:
-            return self.gettrace(slicing=slice(i,i), chain=self._chain)
+            return self.gettrace(slicing=slice(i,i+1), chain=self._chain)
 
     def _finalize(self, chain):
         """Execute task necessary when tallying is over for this trace."""
@@ -133,6 +138,55 @@ class Trace(object):
           The chain index. If None, returns the combined length of all chains.
         """
         pass
+
+    def stats(self, alpha=0.05, start=0, batches=100, chain=None, quantiles=(2.5, 25, 50, 75, 97.5)):
+        """
+        Generate posterior statistics for node.
+
+        :Parameters:
+        name : string
+          The name of the tallyable object.
+
+        alpha : float
+          The alpha level for generating posterior intervals. Defaults to
+          0.05.
+
+        start : int
+          The starting index from which to summarize (each) chain. Defaults
+          to zero.
+
+        batches : int
+          Batch size for calculating standard deviation for non-independent
+          samples. Defaults to 100.
+
+        chain : int
+          The index for which chain to summarize. Defaults to None (all
+          chains).
+
+        quantiles : tuple or list
+          The desired quantiles to be calculated. Defaults to (2.5, 25, 50, 75, 97.5).
+        """
+
+        try:
+            trace = np.squeeze(np.array(self.db.trace(self.name)(chain=chain), float))[start:]
+
+            n = len(trace)
+            if not n:
+                print_('Cannot generate statistics for zero-length trace in', self.__name__)
+                return
+
+
+            return {
+                'n': n,
+                'standard deviation': trace.std(0),
+                'mean': trace.mean(0),
+                '%s%s HPD interval' % (int(100*(1-alpha)),'%'): utils.hpd(trace, alpha),
+                'mc error': batchsd(trace, batches),
+                'quantiles': utils.quantiles(trace, qlist=quantiles)
+            }
+        except:
+            print_('Could not generate output statistics for', self.name)
+            return
 
 
 class Database(object):
@@ -177,8 +231,8 @@ class Database(object):
           to preallocate memory.
         """
 
-        for name, fun in funs_to_tally.iteritems():
-            if not self._traces.has_key(name):
+        for name, fun in six.iteritems(funs_to_tally):
+            if name not in self._traces:
                 self._traces[name] = self.__Trace__(name=name, getfunc=fun, db=self)
 
             self._traces[name]._initialize(self.chains, length)
@@ -202,14 +256,14 @@ class Database(object):
                 self._traces[name].tally(chain)
             except:
                 cls, inst, tb = sys.exc_info()
-                print """
+                warnings.warn("""
 Error tallying %s, will not try to tally it again this chain.
 Did you make all the samevariables and step methods tallyable
 as were tallyable last time you used the database file?
 
 Error:
 
-%s"""%(name, ''.join(traceback.format_exception(cls, inst, tb)))
+%s"""%(name, ''.join(traceback.format_exception(cls, inst, tb))))
                 self.trace_names[chain].remove(name)
 
 
@@ -233,24 +287,26 @@ Error:
         if isinstance(model, pymc.Model):
             self.model = model
         else:
-            raise AttributeError, 'Not a Model instance.'
+            raise AttributeError('Not a Model instance.')
 
         # Restore the state of the Model from an existing Database.
         # The `load` method will have already created the Trace objects.
         if hasattr(self, '_state_'):
-            names = set(reduce(list.__add__, self.trace_names, []))
-            for name, fun in model._funs_to_tally.iteritems():
-                if self._traces.has_key(name):
+            names = set()
+            for morenames in self.trace_names:
+                names.update(morenames)
+            for name, fun in six.iteritems(model._funs_to_tally):
+                if name in self._traces:
                     self._traces[name]._getfunc = fun
                     names.discard(name)
             # if len(names) > 0:
-            #     print "Some objects from the database have not been assigned a getfunc", names
+            #     print_("Some objects from the database have not been assigned a getfunc", names)
 
         # Create a fresh new state.
         # We will be able to remove this when we deprecate traces on objects.
         else:
-            for name, fun in model._funs_to_tally.iteritems():
-                if not self._traces.has_key(name):
+            for name, fun in six.iteritems(model._funs_to_tally):
+                if name not in self._traces:
                     self._traces[name] = self.__Trace__(name=name, getfunc=fun, db=self)
 
     def _finalize(self, chain=-1):
@@ -298,6 +354,7 @@ Error:
         trace._chain = chain
         return trace
 
+
 def load(dbname):
     """Return a Database instance from the traces stored on disk.
 
@@ -314,3 +371,32 @@ def load(dbname):
     """
     pass
 
+
+def batchsd(trace, batches=5):
+    """
+    Calculates the simulation standard error, accounting for non-independent
+    samples. The trace is divided into batches, and the standard deviation of
+    the batch means is calculated.
+    """
+
+    if len(np.shape(trace)) > 1:
+
+        dims = np.shape(trace)
+        #ttrace = np.transpose(np.reshape(trace, (dims[0], sum(dims[1:]))))
+        ttrace = np.transpose([t.ravel() for t in trace])
+
+        return np.reshape([batchsd(t, batches) for t in ttrace], dims[1:])
+
+    else:
+        if batches == 1: return np.std(trace)/np.sqrt(len(trace))
+
+        try:
+            batched_traces = np.resize(trace, (batches, len(trace)/batches))
+        except ValueError:
+            # If batches do not divide evenly, trim excess samples
+            resid = len(trace) % batches
+            batched_traces = np.resize(trace[:-resid], (batches, len(trace)/batches))
+
+        means = np.mean(batched_traces, 1)
+
+        return np.std(means)/np.sqrt(batches)

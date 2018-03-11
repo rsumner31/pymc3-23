@@ -14,19 +14,27 @@ For each distribution:
 #       Maybe compare the relative error (hist-like)/like. Doesn't work so well.
 #       Tried (hist-like)/sqrt(like), seems to work better.
 
-# FIXME no tests for categorical, discrete_uniform, negative_binomial, uniform.
+# FIXME no tests for discrete_uniform, negative_binomial, uniform.
+# TODO add tests for boundaries of distributions with restricted support
+#from decorators import *
 
 #from decorators import *
+from __future__ import with_statement
+from unittest import TestCase
 from pymc.distributions import *
 import unittest
-from numpy.testing import *
-from pymc import flib, utils
-import numpy as np
-from numpy import exp, log, array, sqrt
-from numpy.linalg import cholesky
 import os, pdb, warnings, nose
-from unittest import TestCase
-warnings.simplefilter('ignore', DeprecationWarning)
+
+from numpy import exp, log, array, sqrt
+from numpy.linalg import cholesky, det, inv
+from numpy.testing import *
+import numpy as np
+import numpy.random as _npr
+
+from pymc.distributions import *
+from pymc import flib, utils, six
+xrange = six.moves.xrange
+
 PLOT=True
 DIR = 'testresults'
 if PLOT is True:
@@ -36,18 +44,19 @@ if PLOT is True:
         pass
 try:
     import scipy.stats
-    from scipy import integrate, special, factorial, comb
+    from scipy import integrate, special
+    from scipy.misc import factorial, comb
     from scipy.stats import genextreme, exponweib
     from scipy.optimize import fmin
     SP = True
 except:
-    SP= False
+    SP = False
 
 try:
     import pylab as P
 except:
-    print 'Plotting disabled'
-    PLOT=False
+    six.print_('Plotting disabled')
+    PLOT = False
 
 
 # Some python densities for comparison
@@ -112,7 +121,7 @@ def mv_normal(x, mu, C):
     mu = np.asmatrix(mu)
     C = np.asmatrix(C)
 
-    I = (N/2.)*log(2.*pi) + .5*log(np.linalg.det(C))
+    I = (N/2.)*log(2.*pi) + .5*log(det(C))
     z = (x-mu)
 
     return -(I +.5 * z * np.linalg.inv(C) * z.T).A[0][0]
@@ -279,7 +288,7 @@ class test_arlognormal(TestCase):
 
     def test_consistency(self):
         if not SP:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
         # 1D case
         a = 1
         rho =.8
@@ -307,7 +316,7 @@ class test_bernoulli(TestCase):
         H = np.bincount(samples)*1./N
         l0 = exp(flib.bernoulli(0, **parameters))
         l1 = exp(flib.bernoulli(1, **parameters))
-        assert_array_almost_equal(H, [l0,l1], 2)
+        assert_array_almost_equal(H, [l0,l1], 1)
         # Check normalization
         assert_almost_equal(l0+l1, 1, 4)
 
@@ -380,14 +389,20 @@ class test_betabin(TestCase):
 
 class test_categorical(TestCase):
     def test_consistency(self):
-        parameters={'p':[0.5,0.3]}
-        hist, like, figdata = discrete_consistency(rcategorical, flib.categorical, \
+        parameters={'p':[0.5,0.3,.2]}
+        hist, like, figdata = discrete_consistency(rcategorical, categorical_like, \
             parameters, nrandom=2000)
         assert_array_almost_equal(hist, like, 1)
         if PLOT:
             compare_hist(figname='categorical', **figdata)
         # test_normalization
         assert_almost_equal(like.sum(), 1, 4)
+
+    def test_support(self):
+        """Check to make sure values outside support are -inf"""
+        assert categorical_like([-1], [[0.4,0.4,0.2]]) < -1e300
+        assert categorical_like([3], [[0.4,0.4,0.2]]) < -1e300
+        assert categorical_like([1.3], [[0.4,0.4,0.2]]) < -1e300
 
 class test_cauchy(TestCase):
     def test_consistency(self):
@@ -429,7 +444,7 @@ class test_dirichlet(TestCase):
         s = theta.sum()
         m = r.mean(0)
         m = np.append(m, 1-sum(m))
-        cov_ex = np.cov(np.append(r.transpose(), 1.-sum(r.transpose(),0)))
+        cov_ex = np.cov(np.append(r.T, 1.-sum(r.T,0)))
 
         # Theoretical mean
         M = theta/s
@@ -440,7 +455,7 @@ class test_dirichlet(TestCase):
 
     def test_like(self):
         if not SP:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
         theta = np.array([2.,3.,5.])
         x = np.array([.4,.2,.4])
         l = flib.dirichlet(np.atleast_2d(x[:-1]), np.atleast_2d(theta))
@@ -498,6 +513,25 @@ class test_t(TestCase):
             compare_hist(figname='Student t', **figdata)
         assert_array_almost_equal(hist, like,1)
 
+class test_noncentral_t(TestCase):
+    """Based on gamma."""
+    def test_consistency(self):
+        parameters={'mu':-10, 'lam':0.2, 'nu':5}
+        hist, like, figdata = consistency(rnoncentral_t, noncentral_t_like,
+            parameters, nrandom=5000)
+        if PLOT:
+            compare_hist(figname='noncentral t', **figdata)
+        assert_array_almost_equal(hist, like,1)
+        
+    def test_vectorization(self):
+        a = flib.nct([3,4,5], mu=3, lam=.1, nu=5)
+        b = flib.nct([3,4,5], mu=[3,3,3], lam=.1, nu=5)
+        c = flib.nct([3,4,5], mu=[3,3,3], lam=[.1,.1,.1], nu=5)
+        d = flib.nct([3,4,5], mu=[3,3,3], lam=[.1,.1,.1], nu=[5,5,5])
+        assert_equal(a,b)
+        assert_equal(b,c)
+        assert_equal(c,d)
+
 class test_exponweib(TestCase):
     def test_consistency(self):
         parameters = {'alpha':2, 'k':2, 'loc':1, 'scale':3}
@@ -514,7 +548,7 @@ class test_exponweib(TestCase):
 
     def test_with_scipy(self):
         if not SP:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
         parameters = {'alpha':2, 'k':.3, 'loc':1, 'scale':3}
         r = rexponweib(size=10, **parameters)
         a = exponweib.pdf(r, 2,.3, 1, 3)
@@ -561,7 +595,7 @@ class test_gev(TestCase):
 
     def test_with_scipy(self):
         if not SP:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
         x = [1,2,3,4]
         scipy_y = log(genextreme.pdf(x, -.3, 4, 2))
         flib_y = []
@@ -639,7 +673,7 @@ class test_inverse_gamma(TestCase):
         assert_array_almost_equal(hist, like,1)
 
     def test_normalization(self):
-        parameters=dict(alpha=1.5, beta=4)
+        parameters=dict(alpha=1.5, beta=0.25)
         integral = normalization(flib.igamma, parameters, [0, 10], 200)
         assert_almost_equal(integral, 1, 2)
 
@@ -667,7 +701,7 @@ class test_lognormal(TestCase):
         r = rlognormal(3, .5, 2)
         a = lognormal_like(r, 3, .5)
         b = lognormal_like(r, [3,3], [.5,.5])
-        assert_array_equal(a,b)
+        assert_array_almost_equal(a,b)
 
 class test_multinomial(TestCase):
     def test_random(self):
@@ -681,7 +715,7 @@ class test_multinomial(TestCase):
 
     def test_consistency(self):
         if not SP:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
         p = array([.2,.3,.5])
         n = 10
         x = rmultinomial(n, p, size=5)
@@ -699,14 +733,14 @@ class test_multinomial(TestCase):
 class test_multivariate_hypergeometric(TestCase):
     def test_random(self):
         m = [10,15]
-        N = 200
+        N = 1000
         n = 6
         r = rmultivariate_hypergeometric(n, m, N)
         assert_array_almost_equal(r.mean(0), multivariate_hypergeometric_expval(n,m),1)
 
     def test_likelihood(self):
         if not SP:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
         m = [10,15]
         x = [3,4]
         a = multivariate_hypergeometric_like(x, m)
@@ -720,9 +754,9 @@ class test_mv_normal(TestCase):
         mu = array([3,4])
         C = np.matrix([[1, .5],[.5,1]])
 
-        r = rmv_normal(mu, np.linalg.inv(C), 1000)
-        rC = rmv_normal_cov(mu,C,1000)
-        rchol = rmv_normal_chol(mu,cholesky(C),1000)
+        r = rmv_normal(mu, np.linalg.inv(C), 5000)
+        rC = rmv_normal_cov(mu,C,5000)
+        rchol = rmv_normal_chol(mu,cholesky(C),5000)
 
         assert_array_almost_equal(mu, r.mean(0), 1)
         assert_array_almost_equal(C, np.cov(r.T), 1)
@@ -786,6 +820,44 @@ class test_von_mises(TestCase):
         assert_equal(a,b)
         assert_equal(b,c)
 
+class test_pareto(TestCase):
+    def test_consistency(self):
+        parameters=dict(alpha=5, m = 3)
+        hist, like, figdata = consistency(rpareto, flib.pareto, parameters,\
+            nrandom=5000)
+        if PLOT:
+            compare_hist(figname='pareto', **figdata)
+        assert_array_almost_equal(hist, like, 1)
+
+    def test_vectorization(self):
+        a = flib.pareto([3,4,5], alpha=3, m=1)
+        b = flib.pareto([3,4,5], alpha=[3,3,3], m=1)
+        c = flib.pareto([3,4,5], alpha=[3,3,3], m=[1,1,1])
+        assert_equal(a,b)
+        assert_equal(b,c)
+        
+class test_truncated_pareto(TestCase):
+    def test_consistency(self):
+        parameters=dict(alpha=5, m = 3, b=5)
+        hist, like, figdata = consistency(rtruncated_pareto, flib.truncated_pareto, parameters,\
+            nrandom=5000)
+        if PLOT:
+            compare_hist(figname='truncated_pareto', **figdata)
+        assert_array_almost_equal(hist, like, 1)
+        
+    def test_random(self):
+        r = rtruncated_pareto(alpha=3, m=1, b=6, size=10000)
+        assert_almost_equal(r.mean(), truncated_pareto_expval(3, 1, 6), 1)
+        assert (r > 1).all()
+        assert (r < 6).all()
+
+    def test_vectorization(self):
+        a = flib.truncated_pareto([3,4,5], alpha=3, m=1, b=6)
+        b = flib.truncated_pareto([3,4,5], alpha=[3,3,3], m=1, b=6)
+        c = flib.truncated_pareto([3,4,5], alpha=[3,3,3], m=[1,1,1], b=[6,6,6])
+        assert_equal(a,b)
+        assert_equal(b,c)
+
 class test_poisson(TestCase):
     def test_consistency(self):
         parameters = {'mu':2.}
@@ -811,7 +883,12 @@ class test_truncated_poisson(TestCase):
         if PLOT:
             compare_hist(figname='poisson', **figdata)
         assert_array_almost_equal(hist, like,1)
-
+        
+    def test_random(self):
+        r = rtruncated_poisson(mu=5, k=1, size=10000)
+        assert_almost_equal(r.mean(), truncated_poisson_expval(5, 1), 1)
+        assert (r >= 1).all()
+        
     def test_normalization(self):
         parameters = {'mu':4., 'k':1}
         summation=discrete_normalization(flib.trpoisson,parameters,20)
@@ -836,10 +913,10 @@ class test_skew_normal(TestCase):
         assert_almost_equal(integral, 1, 2)
 
     def test_calling(self):
-        a = skew_normal_like([0,1,2], 2, 1, 5)
-        b = skew_normal_like([0,1,2], [2,2,2], 1, 5)
-        c = skew_normal_like([0,1,2], [2,2,2], [1,1,1], 5)
-        d = skew_normal_like([0,1,2], [2,2,2], [1,1,1], [5,5,5])
+        a = skew_normal_like([1,2,3], 2, 1, 5)
+        b = skew_normal_like([1,2,3], [2,2,2], 1, 5)
+        c = skew_normal_like([1,2,3], [2,2,2], [1,1,1], 5)
+        d = skew_normal_like([1,2,3], [2,2,2], [1,1,1], [5,5,5])
 
         assert_equal(a,b)
         assert_equal(a,c)
@@ -855,14 +932,14 @@ class test_truncnorm(TestCase):
 
 
     def test_random(self):
-        r = rtruncnorm(mu=-1,tau=.1,a=-20,b=20,size=10000)
+        r = rtruncnorm(mu=-1,tau=1,a=-20,b=20,size=10000)
         assert_almost_equal(r.mean(), truncnorm_expval(-1, .1, -20., 20.), 1)
         assert (r > -20).all()
         assert (r < 20).all()
 
     def test_against_scipy(self):
         if not SP:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
         mu = 3.
         sigma = 2.
         tau = 1./sigma**2
@@ -907,27 +984,44 @@ class test_weibull(TestCase):
         b = flib.weibull([1,2], [2,2], [3,3])
         assert_equal(a,b)
 
+#-------------------------------------------------------------------------------
+# Test Wishart / Inverse Wishart distributions
+_Tau_test = np.matrix([[ 209.47883244,   10.88057915,   13.80581557],
+                       [  10.88057915,  213.58694978,   11.18453854],
+                       [  13.80581557,   11.18453854,  209.89396417]])
+
 class test_wishart(TestCase):
     """
-    There are results out there on the asymptotic distribution of eigenvalues
-    of very large Wishart matrices that we could use to make another test case...
+    There are results out there on the asymptotic distribution of
+    eigenvalues of very large Wishart matrices that we could use to
+    make another test case...
     """
-    Tau_test = np.matrix([[ 209.47883244,   10.88057915,   13.80581557],
-                          [  10.88057915,  213.58694978,   11.18453854],
-                          [  13.80581557,   11.18453854,  209.89396417]])/100.
+    # precision matrix
+    Tau_test = _Tau_test / 100
+
+    # def test_samples(self):
+    #     # test consistency between precision and cov-based
+    #     _npr.seed(1)
+    #     sample_a = rwishart(100, self.Tau_test)
+
+    #     _npr.seed(1)
+    #     sample_b = rwishart_cov(100, self.Tau_test.I)
+
+    #     assert_array_almost_equal(sample_a, sample_b)
 
     def test_likelihoods(self):
         try:
             from scipy.special import gammaln
         except:
-            raise nose.SkipTest, "SciPy not installed."
+            raise nose.SkipTest("SciPy not installed.")
 
         W_test = rwishart(100,self.Tau_test)
 
         def slo_wishart_cov(W,n,V):
             p = W.shape[0]
 
-            logp = (n-p-1)*.5 * np.log(np.linalg.det(W)) - n*p*.5*np.log(2) - n*.5*np.log(np.linalg.det(V)) - p*(p-1)/4.*np.log(pi)
+            logp = ((n-p-1)*.5 * np.log(det(W)) - n*p*.5*np.log(2)
+                    - n*.5*np.log(det(V)) - p*(p-1)/4.*np.log(pi))
             for i in xrange(1,p+1):
                 logp -= gammaln((n+1-i)*.5)
             logp -= np.trace(np.linalg.solve(V,W)*.5)
@@ -935,8 +1029,11 @@ class test_wishart(TestCase):
 
         for i in [5,10,100,10000]:
             right_answer = slo_wishart_cov(W_test,i,self.Tau_test.I)
-            assert_array_almost_equal(wishart_like(W_test,i,self.Tau_test), right_answer, decimal=5)
-            assert_array_almost_equal(wishart_cov_like(W_test,i,self.Tau_test.I), right_answer, decimal=5)
+            assert_array_almost_equal(wishart_like(W_test,i,self.Tau_test),
+                                      right_answer, decimal=5)
+            assert_array_almost_equal(
+                wishart_cov_like(W_test,i,self.Tau_test.I),
+                right_answer, decimal=5)
 
     def test_expval(self):
 
@@ -958,60 +1055,123 @@ class test_wishart(TestCase):
         assert(np.abs(np.asarray(delta)/np.asarray(A)).max()<.1)
 
 
-class test_inverse_wishart(TestCase):
-    """
-    Adapted from test_wishart
-    """
-    Tau_test = np.matrix([[ 209.47883244,   10.88057915,   13.80581557],
-                          [  10.88057915,  213.58694978,   11.18453854],
-                          [  13.80581557,   11.18453854,  209.89396417]]).I
+# class test_inverse_wishart(TestCase):
+#     """
+#     Adapted from test_wishart
+#     """
+#     # Covariance matrix (!)
+#     C_test = _Tau_test.I
 
-    def test_likelihoods(self):
-        try:
-            from scipy.special import gammaln
-        except:
-            raise nose.SkipTest, "SciPy not installed."
+#     # def test_samples(self):
+#     #     # test consistency between precision and cov-based
+#     #     _npr.seed(1)
+#     #     sample_a = rinverse_wishart(100, self.C_test)
 
-        IW_test = rinverse_wishart(100,self.Tau_test)
+#     #     _npr.seed(1)
+#     #     sample_b = rinverse_wishart_prec(100, self.C_test.I)
 
-        def slo_inv_wishart(W,n,V):
-            p = W.shape[0]
+#     #     assert_array_almost_equal(sample_a, sample_b)
 
-            logp = -0.5*(n+p+1) * np.log(np.linalg.det(W)) - n*p*.5*np.log(2) + n*.5*np.log(np.linalg.det(V)) - p*(p-1)/4.*np.log(pi)
+#     def test_likelihoods(self):
+#         try:
+#             from scipy.special import gammaln
+#         except:
+#             raise nose.SkipTest("SciPy not installed.")
 
-            for i in xrange(1,p+1):
-                logp -= gammaln((n+1-i)*.5)
-            logp -= 0.5*np.trace(V*W.I)
+#         IW_test = rinverse_wishart(100,self.C_test)
 
-            return logp
+#         def slo_inv_wishart(W,n,V):
+#             p = W.shape[0]
 
-        for i in [5,10,100,10000]:
-            right_answer = slo_inv_wishart(IW_test,i,self.Tau_test)
-            assert_array_almost_equal(inverse_wishart_like(IW_test,i,self.Tau_test), right_answer, decimal=1)
+#             logp = (-0.5*(n+p+1) * np.log(det(W)) - n*p*.5*np.log(2)
+#                      + n*.5*np.log(det(V)) - p*(p-1)/4.*np.log(pi))
 
-    """
-    def test_expval(self):
+#             for i in xrange(1,p+1):
+#                 logp -= gammaln((n+1-i)*.5)
+#             logp -= 0.5*np.trace(V*W.I)
 
-        n = 100
-        N = 1000
+#             return logp
 
-        A = 0.*self.Tau_test
-        for i in xrange(N):
-            A += rinverse_wishart(n,self.Tau_test)
-        A /= N
-        delta=A-inverse_wishart_expval(n,self.Tau_test)
-        print np.abs(np.asarray(delta)/np.asarray(A)).max()
-        assert(np.abs(np.asarray(delta)/np.asarray(A)).max()<.5)
-    """
+#         for i in [5,10,100,10000]:
+#             right_answer = slo_inv_wishart(IW_test,i,self.C_test)
+#             calculated = inverse_wishart_like(IW_test,i,self.C_test)
+#             assert_array_almost_equal(calculated, right_answer, decimal=1)
+
+#             calculated = inverse_wishart_prec_like(IW_test,i,self.C_test.I)
+#             assert_array_almost_equal(calculated, right_answer, decimal=1)
+
+#     # def test_wishart_equivalence(self):
+
+#     #     IW_test = rinverse_wishart(100,self.C_test)
+
+#     #     iwlike = inverse_wishart_like(IW_test, 100, self.C_test)
+#     #     wlike = wishart_like(np.linalg.inv(IW_test), 100, np.linalg.inv(self.C_test))
+
+#     #     assert_almost_equal(iwlike, wlike, decimal=6)
+
+#     """
+#     def test_expval(self):
+
+#         n = 100
+#         N = 1000
+
+#         A = 0.*self.C_test
+#         for i in xrange(N):
+#             A += rinverse_wishart(n,self.C_test)
+#         A /= N
+#         delta=A-inverse_wishart_expval(n,self.C_test)
+#         print np.abs(np.asarray(delta)/np.asarray(A)).max()
+#         assert(np.abs(np.asarray(delta)/np.asarray(A)).max()<.5)
+#     """
 
 class test_Stochastic_generator(TestCase):
     def test_randomwrap(self):
-        B = Bernoulli('x', np.ones(10)*.5, value=np.ones(10))
-        assert_equal(B.value.shape, (10,))
-        B.random()
-        assert_equal(B.value.shape, (10,))
+        for s in ( (1,), (10,), (10,2)):
+            B = Bernoulli('x', np.ones(s)*.5)
+            B.random()
+            assert_equal(B.value.shape, s)
+
+            N = Normal('x', np.ones(s), 1)
+            N.random()
+            assert_equal(N.value.shape, s)
+
+            N = Normal('x', np.ones(s), np.ones(s))
+            N.random()
+            assert_equal(N.value.shape, s)
+
+            N = Normal('x', 1, 1)
+            N.random()
+            assert_equal(N.value.shape, ())
+
+
+class test_shape_consistency(TestCase):
+    def test(self):
+        shape = (10, 5)
+        data = np.zeros(shape)
+        mean = pymc.Normal("mean",mu = 0, tau = 1)
+
+        @pymc.deterministic
+        def means (mean = mean):
+            return (np.ones(shape) * mean).ravel()
+
+        #data has shape (10,5) but means returns an array of shape (10 * 5,)
+        assert_raises(ValueError, pymc.Normal, "obs", mu = means, tau = 1, observed =
+True, value = data)
+
 
 
 if __name__ == '__main__':
-    import nose
-    nose.runmodule()
+    
+    original_filters = warnings.filters[:]
+    warnings.simplefilter("ignore")
+    try:
+        import nose
+        nose.runmodule()
+    finally:
+        warnings.filters = original_filters
+    
+    # TODO: Restore in 2.2
+    # with warnings.catch_warnings():
+    #         warnings.simplefilter('ignore', DeprecationWarning)
+    #         import nose
+    #         nose.runmodule()

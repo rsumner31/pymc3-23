@@ -23,6 +23,9 @@ from pymc import *
 from pymc.utils import safe_len
 import numpy as np
 
+from pymc import six
+xrange = six.moves.xrange
+
 __author__ = 'Anand Patil, anand.prabhakar.patil@gmail.com'
 
 __all__ = ['GammaNormal', 'GammaPoisson', 'GammaExponential', 'GammaGamma',
@@ -39,7 +42,7 @@ __all__ = ['GammaNormal', 'GammaPoisson', 'GammaExponential', 'GammaGamma',
 
 # Wrapped in try block bc NormalSubmodel requires cvxopt.
 try:
-    from NormalSubmodel import NormalSubmodel, crawl_normal_submodel, normal_classes
+    from .NormalSubmodel import NormalSubmodel, crawl_normal_submodel, normal_classes
 
     __all__.append('NormalNormal')
 
@@ -324,13 +327,12 @@ class DirichletMultinomial(StandardGibbs):
 
 
     def propose(self):
-
         theta = self.like_theta.value
         if self.conjugate:
             theta = theta + self.theta.value
         else:
             theta += 1.
-        self.stochastic.value = np.random.dirichlet(theta)
+        self.stochastic.value = rdirichlet(theta)
 
 
 

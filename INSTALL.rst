@@ -2,7 +2,7 @@
 Installation Instructions
 *************************
 
-:Date: Oct 14, 2008
+:Date: Dec 23, 2009
 :Authors: Chris Fonnesbeck, Anand Patil, David Huard
 :Web site: http://code.google.com/p/pymc/
 :Copyright: This document has been placed in the public domain.
@@ -21,36 +21,36 @@ PyMC requires some prerequisite packages to be present on the system.
 Fortunately, there are currently only a few dependencies, and all are
 freely available online.
 
-* `Python`_ version 2.5.
+* `Python`_ version 2.5 or 2.6.
 
-* `NumPy`_ (1.2 or newer): The fundamental scientific programming package, it provides a
+* `NumPy`_ (1.4 or newer): The fundamental scientific programming package, it provides a
   multidimensional array type and many useful functions for numerical analysis.
 
-* `Matplotlib`_ (optional): 2D plotting library which produces publication
+* `Matplotlib (optional)`_ : 2D plotting library which produces publication
   quality figures in a variety of image formats and interactive environments
 
-* `pyTables`_ (optional): Package for managing hierarchical datasets and
+* `pyTables (optional)`_ : Package for managing hierarchical datasets and
   designed to efficiently and easily cope with extremely large amounts of data.
   Requires the `HDF5`_ library.
 
-* `pydot`_ (optional): Python interface to Graphviz's Dot language, it allows
+* `pydot (optional)`_ : Python interface to Graphviz's Dot language, it allows
   PyMC to create both directed and non-directed graphical representations of models.
   Requires the `Graphviz`_ library.
 
-* `SciPy`_ (optional): Library of algorithms for mathematics, science
+* `SciPy (optional)`_ : Library of algorithms for mathematics, science
   and engineering.
 
-* `IPython`_ (optional): An enhanced interactive Python shell and an
+* `IPython (optional)`_ : An enhanced interactive Python shell and an
   architecture for interactive parallel computing.
 
-* `nose`_ (optional): A test discovery-based unittest extension (required
+* `nose (optional)`_ : A test discovery-based unittest extension (required
   to run the test suite).
 
 
 There are prebuilt distributions that include all required dependencies. For
-Mac OSX users, we recommend the `MacPython`_ distribution, the
-`Enthought Python Distribution`_, or Python 2.5.1 that ships with
-OSX 10.5 (Leopard). Windows users should download and install the
+Mac OS X users, we recommend the `MacPython`_ distribution or the
+`Enthought Python Distribution`_ on OS X 10.5 (Leopard) and Python 2.6.1 that 
+ships with OS X 10.6 (Snow Leopard). Windows users should download and install the
 `Enthought Python Distribution`_. The Enthought Python Distribution comes
 bundled with these prerequisites. Note that depending on the currency of these
 distributions, some packages may need to be updated manually.
@@ -65,24 +65,26 @@ tested with PyMC but may work nonetheless.
 
 .. _`NumPy`: http://www.scipy.org/NumPy
 
-.. _`Matplotlib`: http://matplotlib.sourceforge.net/
+.. _`Matplotlib (optional)`: http://matplotlib.sourceforge.net/
 
 .. _`MacPython`: http://www.activestate.com/Products/ActivePython/
 
 .. _`Enthought Python Distribution`:
    http://www.enthought.com/products/epddownload.php
 
-.. _`SciPy`: http://www.scipy.org/
+.. _`SciPy (optional)`: http://www.scipy.org/
 
-.. _`IPython`: http://ipython.scipy.org/
+.. _`IPython (optional)`: http://ipython.scipy.org/
 
-.. _`pyTables`: http://www.pytables.org/moin
+.. _`pyTables (optional)`: http://www.pytables.org/moin
 
 .. _`HDF5`: http://www.hdfgroup.org/HDF5/
 
-.. _`pydot`: http://code.google.com/p/pydot/
+.. _`pydot (optional)`: http://code.google.com/p/pydot/
 
 .. _`Graphviz`: http://www.graphviz.org/
+
+.. _`nose (optional)`: http://somethingaboutorange.com/mrl/projects/nose/
 
 
 Installation using EasyInstall
@@ -144,28 +146,28 @@ type::
     python setup.py install
 
 This will build the C and Fortran extension and copy the libraries and python
-modules in the C:/Python25/Lib/site-packages/pymc directory.
+modules in the C:/Python26/Lib/site-packages/pymc directory.
 
 
 .. _`MinGW`: http://www.mingw.org/
 
 .. _`MSYS`: http://www.mingw.org/wiki/MSYS
 
-.. _`Automated MinGW Installer`: http://sourceforge.net/project/showfiles.php?group_id=2435
+.. _`Automated MinGW Installer`: http://sourceforge.net/projects/mingw/files/
 
-.. _`MSYS-1.0.exe`: http://downloads.sourceforge.net/mingw/MSYS-1.0.10.exe
+.. _`MSYS-1.0.exe`: http://downloads.sourceforge.net/mingw/MSYS-1.0.11.exe
 
 
 Mac OS X or Linux
 -----------------
 In a terminal, type::
 
-    python setup.py build
-    sudo python setup.py install
+    python setup.py config_fc --fcompiler gnu95 build
+    python setup.py install
 
-The `sudo` command is required to install PyMC into the Python ``site-packages``
-directory if it has restricted privileges. You will be prompted for a password,
-and provided you have superuser privileges, the installation will proceed.
+The above syntax also assumes that you have gFortran installed and available. The 
+`sudo` command may be required to install PyMC into the Python ``site-packages``
+directory if it has restricted privileges.
 
 
 .. _`EasyInstall`: http://peak.telecommunity.com/DevCenter/EasyInstall

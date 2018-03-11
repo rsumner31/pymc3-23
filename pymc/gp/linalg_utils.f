@@ -108,17 +108,6 @@ cf2py threadsafe
       RETURN
       END
 
-      subroutine dcopy_wrap(x,y,nx)
-cf2py intent(inplace) y
-cf2py intent(hide) nx
-cf2py threadsafe
-      double precision x(nx), y(nx)
-      external dcopy
-!       dcopy(n,dx,incx,dy,incy)
-
-      CALL dcopy(nx,x,1,y,1)
-      RETURN
-      END
 
       subroutine diag_call(x,n,ndim,V,cov_fun)
 cf2py intent(hide) n
@@ -159,100 +148,6 @@ cf2py intent(out) V
         return
         END
         
-
-      SUBROUTINE dtrmm_wrap(M,N,A,B,UPLO,TRANSA)
-cf2py double precision intent(inplace), dimension(m,n)::B
-cf2py double precision intent(in), dimension(m,m)::A
-cf2py optional character intent(in)::uplo='U'
-cf2py optional character intent(in)::transa='N'
-cf2py integer intent(hide), depend(A)::M=shape(A,0)
-cf2py integer intent(hide), depend(B)::N=shape(B,1)
-cf2py threadsafe
-
-
-      
-*     .. Scalar Arguments ..
-      DOUBLE PRECISION ALPHA
-      INTEGER LDA,LDB,M,N
-      CHARACTER DIAG,SIDE,TRANSA,UPLO
-*     ..
-*     .. Array Arguments ..
-      DOUBLE PRECISION A(M,M),B(M,N)
-      
-      EXTERNAL DTRMM
-! DTRMM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
-*     alpha*op( A )*X or alpha*X*op(A)
-      
-      DIAG = 'N'
-      LDA = M
-      LDB = M
-      SIDE = 'L'
-      ALPHA=1.0D0
-      
-      CALL DTRMM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
-      RETURN
-      END
-      
-
-      SUBROUTINE dtrsm_wrap(M,N,A,B,UPLO,TRANSA,ALPHA)
-cf2py double precision intent(inplace), dimension(m,n)::B
-cf2py double precision intent(in), dimension(m,m)::A
-cf2py optional character intent(in)::uplo='U'
-cf2py optional character intent(in)::transa='N'
-cf2py optional double precision intent(in)::alpha=1.0
-cf2py integer intent(hide), depend(A)::M=shape(A,0)
-cf2py integer intent(hide), depend(B)::N=shape(B,1)
-cf2py threadsafe
-
-
-      
-*     .. Scalar Arguments ..
-      DOUBLE PRECISION ALPHA
-      INTEGER LDA,LDB,M,N
-      CHARACTER DIAG,SIDE,TRANSA,UPLO
-*     ..
-*     .. Array Arguments ..
-      DOUBLE PRECISION A(M,M),B(M,N)
-      
-      EXTERNAL DTRSM
-! DTRSM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
-*     op( A )*X = alpha*B,   or   X*op( A ) = alpha*B,
-      
-      DIAG = 'N'
-      LDA = M
-      LDB = M
-      SIDE = 'L'
-
-      
-      CALL DTRSM(SIDE,UPLO,TRANSA,DIAG,M,N,ALPHA,A,LDA,B,LDB)
-      RETURN
-      END
-
-
-      SUBROUTINE dpotrf_wrap(A,n,info)
-
-cf2py double precision dimension(n,n), intent(inplace) :: A
-cf2py integer depend(A),intent(hide)::n=shape(A,0)
-cf2py integer intent(out)::info
-cf2py threadsafe
-
-      DOUBLE PRECISION A(n,n)
-      INTEGER n, info, i, j
-
-      EXTERNAL DPOTRF
-! DPOTRF( UPLO, N, A, LDA, INFO ) Cholesky factorization
-      
-!     C <- cholesky(C)      
-      call DPOTRF( 'U', n, A, n, info )
-      do i=2,n
-        do j=1,i-1
-          A(i,j)=0.0D0
-        enddo
-      enddo
-      
-      return
-      END
-
       SUBROUTINE gp_array_logp(x, mu, sig, n, like, info)
 
 cf2py intent(copy) x, mu
@@ -315,25 +210,34 @@ cf2py threadsafe
 
 
 c
-! 
-!       SUBROUTINE dpotrs_wrap(chol_fac, b, info, n, m, uplo)
-! 
-! cf2py double precision dimension(n,n), intent(in) :: chol_fac
-! cf2py integer depend(chol_fac), intent(hide)::n=shape(chol_fac,0)
-! cf2py integer depend(b), intent(hide)::m=shape(b,1)
-! cf2py optional character intent(in):: uplo='U'
-! cf2py integer intent(out)::info
-! cf2py double precision intent(inplace), dimension(n,m)::b
-! 
-!       DOUBLE PRECISION chol_fac(n,n), b(n,m)
-!       INTEGER n, info,m
-!       
-!       CHARACTER uplo
-! 
-!       EXTERNAL DPOTRS
-! ! DPOTRS( UPLO, N, NRHS, A, LDA, B, LDB, INFO ) Solves triangular system
-! 
-!       call DPOTRS(uplo,n,m,chol_fac,n,b,s,info)
-!       
-!       return
-!       END
+      SUBROUTINE asqs(C,S,nx,ny,cmin,cmax)
+
+cf2py intent(in) C
+cf2py intent(inplace) S
+cf2py integer intent(in), optional :: cmin = 0
+cf2py integer intent(in), optional :: cmax = -1
+cf2py intent(hide) nx,ny
+cf2py threadsafe
+
+      DOUBLE PRECISION C(nx,ny), cn, S(ny)
+      INTEGER nx, ny, i, j, cmin, cmax
+
+      EXTERNAL DSCAL
+
+      if (cmax.EQ.-1) then
+          cmax = ny
+      end if
+
+
+        do j=cmin+1,cmax
+            S(j) = 0.0D0
+            do i=1,nx
+                cn = C(i,j)
+                S(j) = S(j) + cn * cn
+            end do
+ !          CALL DSCAL(nx,a,C(1,j),1)
+        enddo
+
+
+      RETURN
+      END

@@ -53,10 +53,8 @@ cdef class LazyFunction:
 
 
 
-    L = LazyFunction(fun, arguments[, cache_depth])
+    L = LazyFunction(fun, arguments, ultimate_args, [, cache_depth])
     L.get()
-
-
 
     :Arguments:
     fun:        The function that the LazyFunction uses to compute its
@@ -66,6 +64,9 @@ cdef class LazyFunction:
                 to its function. If any of the arguments is a Stochastic,
                 Deterministic, or Container, that argument's 'value' attribute
                 will be substituted for it when passed to fun.
+    
+    ultimate_args:  A list of stochastics. These should be the extended parents
+                    of all variables in 'arguments'.
 
     cache_depth:    The number of prior computations to 'memoize' in
                     order to skip unnecessary computations.
@@ -121,7 +122,7 @@ cdef class LazyFunction:
         self.cache_depth = cache_depth
 
         # Populate argument iterables
-        for name in arguments.iterkeys():
+        for name in arguments:
             # This object is arg.
             arg = arguments[name]
 

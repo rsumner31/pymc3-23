@@ -1,10 +1,10 @@
-from PyMCObjects import Stochastic
-from Container import Container
-from InstantiationDecorators import stochastic
-from flib import mod_to_circle
-from distributions import rvon_mises, von_mises_like
+from .PyMCObjects import Stochastic
+from .Container import Container
+from .InstantiationDecorators import stochastic
+from .flib import mod_to_circle
+from .distributions import rvon_mises, von_mises_like
 import numpy as np
-from distributions import valuewrapper
+from .distributions import valuewrapper
 
 __all__ = ['CircularStochastic', 'CircVonMises']
 
@@ -16,6 +16,12 @@ class CircularStochastic(Stochastic):
     will be mapped into the interval [lo,hi).
 
     args and kwargs will be passed to Stochastic.__init__.
+    
+    :Attributes:
+      lo : float
+        Lower bound
+      hi : float
+        Upper bound
 
     :SeeAlso: Stochastic
     """
@@ -47,7 +53,7 @@ class CircVonMises(CircularStochastic):
                     cache_depth=2,
                     rseed=True,
                     plot=None,
-                    verbose=None):
+                    verbose=-1):
 
         if value is None:
             arg_eval = Container([mu, kappa]).value

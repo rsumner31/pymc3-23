@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # Do not add setuptools here; use setupegg.py instead. Nose still has problems running
 # tests inside of egg packages, so it is useful to be able to install without eggs as needed.
+
+from __future__ import print_function
+
 from numpy.distutils.misc_util import Configuration
 from numpy.distutils.system_info import get_info
 import os, sys
@@ -21,14 +24,14 @@ dist = sys.argv[1]
 # If optimized lapack/ BLAS libraries are present, compile distributions that involve linear algebra against those.
 # Otherwise compile blas and lapack from netlib sources.
 lapack_info = get_info('lapack_opt',1)
-f_sources = ['pymc/flib.f','pymc/histogram.f', 'pymc/flib_blas.f', 'pymc/math.f', 'pymc/gibbsit.f', 'cephes/i0.c',
+f_sources = ['pymc/flib.f','pymc/histogram.f', 'pymc/flib_blas.f', 'pymc/blas_wrap.f', 'pymc/math.f', 'pymc/gibbsit.f', 'cephes/i0.c',
              'cephes/c2f.c','cephes/chbevl.c']
 if lapack_info:
     config.add_extension(name='flib',sources=f_sources, extra_info=lapack_info, f2py_options=['skip:ppnd7'])
 
 if not lapack_info or dist in ['bdist', 'sdist']:
     ##inc_dirs = ['blas/BLAS','lapack/double']
-    print 'No optimized BLAS or Lapack libraries found, building from source. This may take a while...'
+    print('No optimized BLAS or Lapack libraries found, building from source. This may take a while...')
     for fname in os.listdir('blas/BLAS'):
         # Make sure this is a Fortran file, and not one of those weird hidden files that
         # pop up sometimes in the tarballs
@@ -43,7 +46,7 @@ if not lapack_info or dist in ['bdist', 'sdist']:
     config.add_extension(name='flib',sources=f_sources)
 
 
-
+# TODO Convert Pyrex to Cython
 # ============================
 # = Compile Pyrex extensions =
 # ============================
@@ -64,12 +67,12 @@ except:
 
 # Compile linear algebra utilities
 if lapack_info:
-    config.add_extension(name='gp.linalg_utils',sources=['pymc/gp/linalg_utils.f'], extra_info=lapack_info)
+    config.add_extension(name='gp.linalg_utils',sources=['pymc/gp/linalg_utils.f','pymc/blas_wrap.f'], extra_info=lapack_info)
     config.add_extension(name='gp.incomplete_chol',sources=['pymc/gp/incomplete_chol.f'], extra_info=lapack_info)
 
 if not lapack_info or dist in ['bdist', 'sdist']:
-    print 'No optimized BLAS or Lapack libraries found, building from source. This may take a while...'
-    f_sources = []
+    print('No optimized BLAS or Lapack libraries found, building from source. This may take a while...')
+    f_sources = ['pymc/blas_wrap.f']
     for fname in os.listdir('blas/BLAS'):
         if fname[-2:]=='.f':
             f_sources.append('blas/BLAS/'+fname)
@@ -93,13 +96,13 @@ config.add_extension(name='gp.cov_funs.distances',sources=['pymc/gp/cov_funs/dis
 
 if __name__ == '__main__':
     from numpy.distutils.core import setup
-    setup(  version="2.0",
+    setup(  version="2.2alpha",
             description="Markov Chain Monte Carlo sampling toolkit.",
             #maintainer="David Huard",
             #maintainer_email="david.huard@gmail.com",
             author="Christopher Fonnesbeck, Anand Patil and David Huard",
             author_email="fonnesbeck@gmail.com ",
-            url="pymc.googlecode.com",
+            url="github.com/pymc-devs/pymc",
             #download_url="",
             license="Academic Free License",
             classifiers=[
@@ -112,7 +115,7 @@ if __name__ == '__main__':
                 'Programming Language :: Fortran',
                 'Topic :: Scientific/Engineering',
                  ],
-            requires=['NumPy (>=1.2)',],
+            requires=['NumPy (>=1.3)',],
             long_description="""
             Bayesian estimation, particularly using Markov chain Monte Carlo (MCMC),
             is an increasingly relevant approach to statistical estimation. However,
@@ -126,7 +129,7 @@ if __name__ == '__main__':
             ``pymc`` only requires ``NumPy``. All other dependencies such as ``matplotlib``,
             ``SciPy``, ``pytables``, ``sqlite`` or ``mysql`` are optional.
             """,
-            packages=["pymc", "pymc/database", "pymc/examples", "pymc/tests", "pymc/gp", "pymc/gp/cov_funs"],
+            packages=["pymc", "pymc/database", "pymc/examples", "pymc/examples/gp", "pymc/tests", "pymc/gp", "pymc/gp/cov_funs"],
             #cmdclass={'upload2google':upload2google},
             **(config_dict))
 

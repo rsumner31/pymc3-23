@@ -43,22 +43,27 @@ __all__ = [
     '__PyMCThreadPool__',
     '__PyMCExcInfo__',
     '__PyMCLock__',
-    'map_noreturn'
+    'map_noreturn',
+    'thread_partition_array'
 ]
 
-__author__ = "Christopher Arndt"
-__version__ = "1.2.4"
-__revision__ = "$Revision: 281 $"
-__date__ = "$Date: 2008-05-04 17:41:41 +0200 (So, 04 Mai 2008) $"
+__author__ = "Christopher Arndt and Anand Patil"
+__version__ = "1.2.4, modified"
 __license__ = 'MIT license'
 
 
 # standard library modules
 import sys
 import threading
-import Queue
+try:
+    import queue    # Python 3
+except ImportError:
+    import Queue as queue # Python 2
 import traceback
 import os
+import numpy as np
+
+from . import six
 
 # exceptions
 class NoResultsPending(Exception):
@@ -77,7 +82,7 @@ def _handle_thread_exception(request, exc_info):
     This just prints the exception info via ``traceback.print_exception``.
 
     """
-    print exc_info
+    #print exc_info
     traceback.print_exception(*exc_info)
 
 
@@ -264,8 +269,8 @@ class ThreadPool:
             To prevent this, always set ``timeout > 0`` when calling
             ``ThreadPool.putRequest()`` and catch ``Queue.Full`` exceptions.
         """
-        self._requests_queue = Queue.Queue(q_size)
-        # self._results_queue = Queue.Queue(resq_size)
+        self._requests_queue = queue.Queue(q_size)
+        # self._results_queue = queue.Queue(resq_size)
         self.workers = []
         self.workRequests = {}
         self.createWorkers(num_workers)
@@ -304,10 +309,15 @@ class ThreadPool:
 
 
 
-if os.environ.has_key('OMP_NUM_THREADS'):
+
+try:
     __PyMCThreadPool__ = ThreadPool(int(os.environ['OMP_NUM_THREADS']))
-else:
-    __PyMCThreadPool__ = ThreadPool(2)
+except:
+    try:
+        import multiprocessing
+    except ImportError:
+        raise ImportError('The multiprocessing module is not available. If you are using Python 2.5, please install the backport of multiprocessing before continuing.')
+    __PyMCThreadPool__ = ThreadPool(multiprocessing.cpu_count())
 
 class CountDownLatch(object):
     def __init__(self, n):
@@ -359,8 +369,7 @@ def map_noreturn(targ, argslist):
     done_lock.await()
 
     if exceptions:
-        a, b, c = exceptions[0]
-        raise a, b, c
+        six.reraise(*exceptions[0])
 
 
 def set_threadpool_size(n):
@@ -369,6 +378,19 @@ def set_threadpool_size(n):
 
 def get_threadpool_size():
     return len(__PyMCThreadPool__.workers)
+    
+def thread_partition_array(x):
+    "Partition work arrays for multithreaded addition and multiplication"
+    n_threads = get_threadpool_size()
+    if len(x.shape)>1:
+        maxind = x.shape[1]
+    else:
+        maxind = x.shape[0]
+    bounds = np.array(np.linspace(0, maxind, n_threads+1),dtype='int')
+    cmin = bounds[:-1]
+    cmax = bounds[1:]
+    return cmin,cmax
+
 
 __PyMCLock__ = threading.Lock()
 __PyMCExcInfo__ = [None]

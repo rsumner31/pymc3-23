@@ -14,11 +14,13 @@ __all__ = ['BasisCovariance', 'SeparableBasisCovariance']
 
 from numpy import *
 from numpy.linalg import eigh, solve, cholesky, LinAlgError
-from GPutils import regularize_array, trisolve
-from linalg_utils import basis_diag_call
-from incomplete_chol import ichol_basis, ichol_full
-from Covariance import Covariance
+from .GPutils import regularize_array, trisolve
+from .linalg_utils import basis_diag_call
+from .incomplete_chol import ichol_basis, ichol_full
+from .Covariance import Covariance
 
+from pymc import six
+xrange = six.moves.xrange
 
 class BasisCovariance(Covariance):
 
@@ -74,7 +76,7 @@ class BasisCovariance(Covariance):
         elif coef_cov.shape == self.shape*2:
             self.coef_cov = asmatrix(coef_cov.reshape((self.n, self.n)))
         else:
-            raise ValueError, "Covariance tensor's shape must be basis.shape or basis.shape*2 (using tuple multiplication)."
+            raise ValueError("Covariance tensor's shape must be basis.shape or basis.shape*2 (using tuple multiplication).")
 
         # Cholesky factor the covariance matrix of the coefficients.
         U, m, piv = ichol_full(c=self.coef_cov, reltol=relative_precision)
@@ -182,7 +184,7 @@ class BasisCovariance(Covariance):
             return {'piv': piv_return, 'U': U_return}
 
 
-    def observe(self, obs_mesh, obs_V):
+    def observe(self, obs_mesh, obs_V, output_type='o'):
         __doc__ = Covariance.observe.__doc__
 
         ndim = obs_mesh.shape[1]
@@ -191,7 +193,7 @@ class BasisCovariance(Covariance):
 
         if self.ndim is not None:
             if not ndim==self.ndim:
-                raise ValueError, "Dimension of observation mesh is not equal to dimension of base mesh."
+                raise ValueError("Dimension of observation mesh is not equal to dimension of base mesh.")
         else:
             self.ndim = ndim
 
@@ -200,12 +202,19 @@ class BasisCovariance(Covariance):
 
         # chol(basis_o.T * coef_cov * basis_o)
         chol_inner = self.coef_U * basis_o
-
-        # chol(basis_o.T * coef_cov * basis_o + diag(obs_V)). Really should do this as low-rank update of covariance
-        # of V.
-        U, piv, m = ichol_basis(basis=chol_inner, nug=obs_V, reltol=self.relative_precision)
-
-
+        
+        if output_type=='s':
+            C_eval = dot(chol_inner.T, chol_inner).copy('F')
+            U_eval = linalg.cholesky(C_eval).T.copy('F')
+            U = U_eval
+            m = U_eval.shape[0]            
+            piv = arange(m)
+        else:
+            # chol(basis_o.T * coef_cov * basis_o + diag(obs_V)). Really should do this as low-rank update of covariance
+            # of V.
+            
+            U, piv, m = ichol_basis(basis=chol_inner, nug=obs_V, reltol=self.relative_precision)
+            
         U = asmatrix(U)
         piv_new = piv[:m]
         self.obs_piv = piv_new
@@ -219,19 +228,25 @@ class BasisCovariance(Covariance):
         # chol(basis_o.T * coef_cov * basis_o + diag(obs_V)).T.I * basis_o.T * coef_cov
         self.Uo_cov = self.Uo_cov * self.coef_cov
 
-        # coef_cov -= coef_cov * basis_o * (basis_o.T * coef_cov * basis_o + diag(obs_V)).I * basis_o.T * coef_cov
-        self.coef_cov -= self.Uo_cov.T * self.Uo_cov
+        # coef_cov = coef_cov - coef_cov * basis_o * (basis_o.T * coef_cov * basis_o + diag(obs_V)).I * basis_o.T * coef_cov
+        self.coef_cov = self.coef_cov - self.Uo_cov.T * self.Uo_cov
 
         # coef_U = chol(coef_cov)
         U, m, piv = ichol_full(c=self.coef_cov, reltol=self.relative_precision)
         U = asmatrix(U)
         self.coef_U = U[:m,argsort(piv)]
         self.m = m
+    
+        if output_type=='o':
+            return piv_new, obs_mesh_new
+        
+        if output_type=='s':
+            return U_eval, C_eval, basis_o
+            
+        raise ValueError('Output type not recognized.')
 
-        return piv_new, obs_mesh_new, None
 
-
-    def __call__(self, x, y=None, observed=True, regularize=True):
+    def __call__(self, x, y=None, observed=True, regularize=True, return_Uo_Cxo=False):
 
         # Record the initial shape of x and regularize it.
         orig_shape = shape(x)
@@ -253,13 +268,13 @@ class BasisCovariance(Covariance):
         # Safety.
         if self.ndim is not None:
             if not self.ndim == ndimx:
-                raise ValueError, "The number of spatial dimensions of x does not match the number of spatial dimensions of the Covariance instance's base mesh."
+                raise ValueError("The number of spatial dimensions of x does not match the number of spatial dimensions of the Covariance instance's base mesh.")
 
         # Evaluate the Cholesky factor of self's evaluation on x.
         # Will be observed or not depending on which version of coef_U
         # is used.
-        basis_x = self.eval_basis(x, regularize=False)
-        basis_x = coef_U*basis_x
+        basis_x_ = self.eval_basis(x, regularize=False)
+        basis_x = coef_U*basis_x_
 
         # ==========================================================
         # = If only one argument is provided, return the diagonal: =
@@ -267,14 +282,20 @@ class BasisCovariance(Covariance):
         if y is None:
             # Diagonal calls done in Fortran for speed.
             V = basis_diag_call(basis_x)
-            return V.reshape(orig_shape)
+            if return_Uo_Cxo:
+                return V.reshape(orig_shape), basis_x_
+            else:
+                return V.reshape(orig_shape)
 
 
         # ===========================================================
         # = If the same argument is provided twice, save some work: =
         # ===========================================================
         if y is x:
-            return basis_x.T*basis_x
+            if return_Uo_Cxo:
+                return basis_x.T*basis_x, basis_x_
+            else:
+                return basis_x
 
 
         # =========================================
@@ -290,7 +311,7 @@ class BasisCovariance(Covariance):
             leny = y.shape[0]
 
             if not ndimx==ndimy:
-                raise ValueError, 'The last dimension of x and y (the number of spatial dimensions) must be the same.'
+                raise ValueError('The last dimension of x and y (the number of spatial dimensions) must be the same.')
 
             # Evaluate the Cholesky factor of self's evaluation on y.
             # Will be observed or not depending on which version of coef_U
@@ -309,11 +330,11 @@ class BasisCovariance(Covariance):
     def _obs_reg(self, M, dev_new, m_old):
         # reg_mat = chol(self.basis_o.T * self.coef_cov * self.basis_o + diag(obs_V)).T.I * self.basis_o.T * self.coef_cov *
         # chol(self(obs_mesh_*, obs_mesh_*)).T.I * M.dev
-        M.reg_mat += self.Uo_cov.T * asmatrix(trisolve(self.Uo, dev_new, uplo='U', transa='T')).T
+        M.reg_mat = M.reg_mat + self.Uo_cov.T * asmatrix(trisolve(self.Uo, dev_new, uplo='U', transa='T')).T
         return M.reg_mat
 
-    def _obs_eval(self, M, M_out, x):
-        basis_x = self.eval_basis(x, regularize=False)
+    def _obs_eval(self, M, M_out, x, Uo_Cxo=None):
+        basis_x = Uo_Cxo if Uo_Cxo is not None else self.eval_basis(x, regularize=False)
         M_out += asarray(dot(basis_x.T, M.reg_mat)).squeeze()
         return M_out
 

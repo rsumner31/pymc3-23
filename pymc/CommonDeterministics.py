@@ -10,21 +10,34 @@ equivalent functionality.
 
 __docformat__='reStructuredText'
 
-import PyMCObjects as pm
-from Node import Variable
-from Container import Container
-from InstantiationDecorators import deterministic
+from . import PyMCObjects as pm
+from .Node import Variable
+from .Container import Container
+from .InstantiationDecorators import deterministic, check_special_methods
 import numpy as np
-import inspect
-from utils import logit, invlogit, safe_len
-from flib import stukel_logit, stukel_invlogit
-from types import UnboundMethodType
+from numpy import sum, shape,size, ravel, sign, zeros, ones, broadcast, newaxis
+import inspect, types
+from .utils import safe_len, stukel_logit, stukel_invlogit, logit, invlogit, value, find_element
 from copy import copy
 import sys
+import operator
+try:
+    import builtins    # Python 3
+except ImportError:
+    import __builtin__ as builtins  # Python 2
+try:
+    from types import UnboundMethodType
+except ImportError:
+    # On Python 3, unbound methods are just functions.
+    def UnboundMethodType(func, inst, cls):
+        return func
+
+from . import six
+xrange = six.moves.xrange
 
 __all__ = ['CompletedDirichlet', 'LinearCombination', 'Index', 'Lambda', 'lambda_deterministic', 'lam_dtrm',
             'logit', 'invlogit', 'stukel_logit', 'stukel_invlogit', 'Logit', 'InvLogit', 'StukelLogit', 'StukelInvLogit',
-            'pfunc']
+            'pfunc']#+['iter_','complex_','int_','long_','float_','oct_','hex_']
 
 class Lambda(pm.Deterministic):
     """
@@ -54,16 +67,15 @@ class Lambda(pm.Deterministic):
       LinearCombination, Index
     """
     def __init__(self, name, lam_fun, doc='A Deterministic made from an anonymous function', *args, **kwds):
-
             (parent_names, junk0, junk1, parent_values) = inspect.getargspec(lam_fun)
 
             if junk0 is not None \
               or junk1 is not None \
               or parent_values is None:
-                raise ValueError, '%s: All arguments to lam_fun must have default values.' % name
+                raise ValueError('%s: All arguments to lam_fun must have default values.' % name)
 
             if not len(parent_names) == len(parent_values):
-                raise ValueError, '%s: All arguments to lam_fun must have default values.' % name
+                raise ValueError('%s: All arguments to lam_fun must have default values.' % name)
 
             parents = dict(zip(parent_names[-len(parent_values):], parent_values))
 
@@ -226,7 +238,7 @@ class CompletedDirichlet(pm.Deterministic):
     :SeeAlso:
       Deterministic, Lambda, Index, LinearCombination
     """
-    def __init__(self, name, D, doc=None, trace=True, cache_depth=2, plot=None, verbose=None):
+    def __init__(self, name, D, doc=None, trace=True, cache_depth=2, plot=None, verbose=-1):
 
         def eval_fun(D):
             N = len(D)
@@ -284,7 +296,7 @@ class LinearCombination(pm.Deterministic):
         self.N = len(self.x)
 
         if not len(self.y)==len(self.x):
-            raise ValueError, 'Arguments x and y must be same length.'
+            raise ValueError('Arguments x and y must be same length.')
 
         def eval_fun(x, y):
             out = np.dot(x[0], y[0])
@@ -314,12 +326,12 @@ class LinearCombination(pm.Deterministic):
             if isinstance(x[i], pm.Stochastic):
 
                 if x[i] is y[i]:
-                    raise ValueError, 'Stochastic %s multiplied by itself in LinearCombination %s.' %(x[i], self)
+                    raise ValueError('Stochastic %s multiplied by itself in LinearCombination %s.' %(x[i], self))
 
                 stochastic_elem = x[i]
                 self.sides[stochastic_elem].append('L')
                 this_coef = Lambda('%s_coef'%stochastic_elem, lambda c=y[i]: np.asarray(c))
-                self.coefs[stochastic_elem].append(this_coef)
+                self.coefs[stochastic_elem].append(this_coef) 
 
             if isinstance(y[i], pm.Stochastic):
 
@@ -332,13 +344,19 @@ class LinearCombination(pm.Deterministic):
         self.sides = Container(self.sides)
         self.coefs = Container(self.coefs)
 
-
-class Index(LinearCombination):
+# TODO: Index should be special-cased in the future.
+# TODO: - It should be a subclass of LinearCombination.
+# TODO:   Reason: The Gibbs samplers should be able to recognize it as a linear combination.
+# TODO: - It should be considered an 'ultimate argument' by LazyFunction, so that it is checked for changes rather
+# TODO:   than its parents.
+# TODO:   Reason: If parents change at elements that aren't selected, here's no point having all the descendants
+# TODO:   recompute.
+class Index(pm.Deterministic):
     """
-    I = Index(name, x, y, index[, doc, dtype=None, trace=True,
+    I = Index(name, x, index[, doc, dtype=None, trace=True,
         cache_depth=2, plot=None])
 
-    A deterministic returning dot(x[index], y[index]).
+    A deterministic returning x[index].
 
     Useful for hierarchical models/ clustering/ discriminant analysis.
     Emulates LinearCombination to make it easier to write Gibbs step
@@ -349,8 +367,6 @@ class Index(LinearCombination):
         The name of the variable
       x : list or variable
         Will be multiplied against y and summed.
-      y : list or variable
-        Will be multiplied against x and summed.
       index : integer or variable
         Index to use when computing value.
       other parameters :
@@ -359,20 +375,15 @@ class Index(LinearCombination):
     :Attributes:
       index : variable
         Valued as current index.
-      x, y, N, coefs, offsets, sides :
-        Same as LinearCombination, but with x = x[index] and y = 1.
+      x:
+        Variable that gets sliced.
 
     :SeeAlso:
       Deterministic, Lambda, LinearCombination
-
-    TODO: Special lazy function for Index that only caches value of parent currently
-    'pointed to'.
     """
     def __init__(self, name, x, index, doc = "Selects one of a list of several variables", *args, **kwds):
         self.index = Lambda('index', lambda i=index: np.int(i))
-        self.N = 1
         self.x = x
-        self.y = []
 
         def eval_fun(x, index):
             return x[index]
@@ -380,32 +391,9 @@ class Index(LinearCombination):
         pm.Deterministic.__init__(self,
                                 eval=eval_fun,
                                 doc=doc,
-                                name = name,
+                                name = '%s[%s]'%(str(x), str(index)),
                                 parents = {'x':x, 'index':self.index},
                                 *args, **kwds)
-
-        # Tabulate coefficients and offsets of each constituent Stochastic.
-        self.coefs = {}
-        self.sides = {}
-
-        for s in self.parents.stochastics | self.parents.observed_stochastics:
-
-            @deterministic
-            def coef(index=self.index, x=x):
-                if self.x is s:
-                    return np.eye(safe_len(x[index]))
-                elif self.x[index] is s:
-                    return np.eye(safe_len(x[index]))
-                else:
-                    return None
-
-            self.coefs[s] = [coef]
-            self.sides[s] = ['L']
-
-        self.sides = Container(self.sides)
-        self.coefs = Container(self.coefs)
-
-# TODO: Write tests for all this!
 
 # =================================================================
 # = pfunc converts ordinary functions to Deterministic factories. =
@@ -416,7 +404,7 @@ def pufunc(func):
     """
     def dtrm_generator(*args):
         if len(args) != func.nin:
-            raise ValueError, 'invalid number of arguments'
+            raise ValueError('invalid number of arguments')
         name = func.__name__ + '('+'_'.join([str(arg) for arg in list(args)])+')'
         doc_str = 'A deterministic returning %s(%s)'%(func.__name__, ', '.join([str(arg) for arg in args]))
         parents = {}
@@ -458,23 +446,23 @@ def pfunc(func):
         return pufunc(func)
     elif not inspect.isfunction(func):
         if func.__name__ == '__call__':
-            raise ValueError, 'Cannot get argspec of call method. Is it builtin?'
+            raise ValueError('Cannot get argspec of call method. Is it builtin?')
         try:
             return pfunc(func.__call__)
         except:
             cls, inst, tb = sys.exc_info()
             inst = cls('Failed to create pfunc wrapper from object %s. Original error message:\n\n%s'%(func, inst.message))
-            raise cls, inst, tb
+            six.reraise(cls, inst, tb)
     fargs, fvarargs, fvarkw, fdefaults = inspect.getargspec(func)
     n_fargs = len(fargs)
 
     def dtrm_generator(*args, **kwds):
         name = func.__name__ + '('+'_'.join([str(arg) for arg in list(args) + kwds.values()])+')'
-        doc_str = 'A deterministic returning %s(%s, %s)'%(func.__name__, ', '.join([str(arg) for arg in args]), ', '.join(['%s=%s'%(key, str(val)) for key, val in kwds.iteritems()]))
+        doc_str = 'A deterministic returning %s(%s, %s)'%(func.__name__, ', '.join([str(arg) for arg in args]), ', '.join(['%s=%s'%(key, str(val)) for key, val in six.iteritems(kwds)]))
 
         parents = {}
         varargs = []
-        for kwd, val in kwds.iteritems():
+        for kwd, val in six.iteritems(kwds):
             parents[kwd] = val
         for i in xrange(len(args)):
             if i < n_fargs:
@@ -510,28 +498,58 @@ Deterministic-generating wrapper for %s. Original docstring:
 # = Add special methods to variables to support FBC syntax =
 # ==========================================================
 
-def create_uni_method(op_name, klass):
+def create_uni_method(op_name, klass, jacobians = None):
     """
     Creates a new univariate special method, such as A.__neg__() <=> -A,
     for target class. The method is called __op_name__.
     """
     # This function will become the actual method.
+    op_modules = [operator, builtins]
+    op_names = [ op_name, op_name + '_']
+
+    op_function_base = find_element( op_names,op_modules, error_on_fail = True)
+    #many such functions do not take keyword arguments, so we need to wrap them 
+    def op_function(self):
+        return op_function_base(self)
+    
     def new_method(self):
         # This code creates a Deterministic object.
-        def eval_fun(self,op=op):
-            return getattr(self, op)()
-        return pm.Deterministic(eval_fun,
+        if not check_special_methods():
+            raise NotImplementedError('Special method %s called on %s, but special methods have been disabled. Set pymc.special_methods_available to True to enable them.'%(op_name, str(self)))
+            
+        jacobian_formats = {'self' : 'transformation_operation'}
+        return pm.Deterministic(op_function,
                                 'A Deterministic returning the value of %s(%s)'%(op_name, self.__name__),
                                 '('+op_name+'_'+self.__name__+')',
-                                {'self':self, 'op': '__'+op_name+'__'},
+                                parents = {'self':self},
                                 trace=False,
-                                plot=False)
-    # Make the function into a method for klass.
+                                plot=False, 
+                                jacobians=jacobians,
+                                jacobian_formats = jacobian_formats)
+    # Make the function into a method for klass. 
+    
     new_method.__name__ = '__'+op_name+'__'
     setattr(klass, new_method.__name__, UnboundMethodType(new_method, None, klass))
 
+def create_casting_method(op, klass):
+    """
+    Creates a new univariate special method, such as A.__float__() <=> float(A.value),
+    for target class. The method is called __op_name__.
+    """
+    # This function will become the actual method.
+    def new_method(self, op=op):
+        if not check_special_methods():
+            raise NotImplementedError('Special method %s called on %s, but special methods have been disabled. Set pymc.special_methods_available to True to enable them.'%(op_name, str(self)))
+        return op(self.value)
+    # Make the function into a method for klass.
+    new_method.__name__ = '__'+op.__name__+'__'
+    setattr(klass, new_method.__name__, UnboundMethodType(new_method, None, klass))
 
-def create_rl_bin_method(op_name, klass):
+
+        
+                
+
+def create_rl_bin_method(op_name, klass,  jacobians = {}):
     """
     Creates a new binary special method with left and right versions, such as
         A.__mul__(B) <=> A*B,
@@ -541,32 +559,33 @@ def create_rl_bin_method(op_name, klass):
     # Make left and right versions.
     for prefix in ['r','']:
         # This function will became the methods.
+        op_modules = [operator, builtins]
+        op_names = [ op_name, op_name + '_']
+
+        op_function_base = find_element( op_names, op_modules, error_on_fail = True)
+        #many such functions do not take keyword arguments, so we need to wrap them 
+        def op_function(a, b):
+            return op_function_base(a, b)
+            
         def new_method(self, other, prefix=prefix):
+            if not check_special_methods():
+                raise NotImplementedError('Special method %s called on %s, but special methods have been disabled. Set pymc.special_methods_available to True to enable them.'%(op_name, str(self)))
             # This code will create one of two Deterministic objects.
             if prefix == 'r':
-                # Right version: raises error on failure.
-                parents = {'self':self, 'other':other, 'op':'__r' + op_name + '__'}
-                def eval_fun(self,other,op):
-                    out = getattr(self, op)(other)
-                    if out is NotImplemented:
-                        # the rt version has failed, meainng the lft version has failed as well.
-                        raise TypeError, "unsupported operand type(s) for %s: '%s' and '%s'"%(op.replace('_',''), self.__class__.__name__, other.__class__.__name__)
-                    return out
+                parents = {'a':other, 'b':self}
+                
             else:
-                # Left version: tries right version on failure.
-                parents = {'self':self, 'other':other, 'op':'__' + op_name + '__', 'rt_op': '__r'+op_name+'__'}
-                def eval_fun(self, other, op, rt_op):
-                    out = getattr(self, op)(other)
-                    if out is NotImplemented:
-                        # if try the rt version.
-                        out = getattr(other, rt_op)(self)
-                    return out
-            return pm.Deterministic(eval_fun,
+                parents = {'a':self, 'b':other}
+            jacobian_formats = {'a' : 'broadcast_operation',
+                               'b' : 'broadcast_operation'}
+            return pm.Deterministic(op_function,
                                     'A Deterministic returning the value of %s(%s,%s)'%(prefix+op_name,self.__name__, str(other)),
                                     '('+'_'.join([self.__name__,prefix+op_name,str(other)])+')',
                                     parents,
                                     trace=False,
-                                    plot=False)
+                                    plot=False,
+                                    jacobians = jacobians,
+                                    jacobian_formats = jacobian_formats)
         # Convert the functions into methods for klass.
         new_method.__name__ = '__'+prefix+op_name+'__'
         setattr(klass, new_method.__name__, UnboundMethodType(new_method, None, klass))
@@ -581,6 +600,8 @@ def create_rl_lin_comb_method(op_name, klass, x_roles, y_roles):
     """
     # This function will became the methods.
     def new_method(self, other, x_roles=x_roles, y_roles=y_roles):
+        if not check_special_methods():
+            raise NotImplementedError('Special method %s called on %s, but special methods have been disabled. Set pymc.special_methods_available to True to enable them.'%(op_name, str(self)))
         x = []
         y = []
         for xr in x_roles:
@@ -611,6 +632,8 @@ def create_bin_method(op_name, klass):
     """
     # This function will become the method.
     def new_method(self, other):
+        if not check_special_methods():
+            raise NotImplementedError('Special method %s called on %s, but special methods have been disabled. Set pymc.special_methods_available to True to enable them.'%(op_name, str(self)))
         # This code creates a Deterministic object.
         def eval_fun(self, other, op):
             return getattr(self, op)(other)
@@ -624,18 +647,82 @@ def create_bin_method(op_name, klass):
     new_method.__name__ = '__'+op_name+'__'
     setattr(klass, new_method.__name__, UnboundMethodType(new_method, None, klass))
 
+def create_nonimplemented_method(op_name, klass):
+    """
+    Creates a new method that raises NotImplementedError.
+    """
+    def new_method(self, *args):
+        raise NotImplementedError('Special method %s has not been implemented for PyMC variables.'%op_name)
+    new_method.__name__ = '__'+op_name+'__'
+    setattr(klass, new_method.__name__, UnboundMethodType(new_method, None, klass))
+
+def op_to_jacobians(op, module):
+    if type(module) is types.ModuleType:
+        module = copy(module.__dict__)
+    elif type(module) is dict:
+        module = copy(module)
+    else:
+        raise AttributeError
+
+    name = op + "_jacobians"
+    try:
+       jacobians = module[name]
+    except:
+        jacobians = {} 
+    
+    return jacobians
 
 # Left/right binary operators
-for op in ['div', 'truediv', 'floordiv', 'mod', 'divmod', 'pow', 'lshift', 'rshift', 'and', 'xor', 'or']:
-    create_rl_bin_method(op, Variable)
 
-# Binary operators
-for op in ['lt', 'le', 'eq', 'ne', 'gt', 'ge']:
-    create_bin_method(op ,Variable)
+    
+truediv_jacobians = {'a' : lambda a, b: ones(shape(a))/b,
+                    'b' : lambda a, b: - a / b**2  }
+
+div_jacobians = truediv_jacobians        
+    
+pow_jacobians = {'a' : lambda a, b: b * a**(b - 1.0),
+                'b' : lambda a, b: np.log(a) * a**b}  
+
+
+for op in ['truediv', 'floordiv', 'mod', 'divmod', 'pow', 'lshift', 'rshift', 'and', 'xor', 'or']:
+    create_rl_bin_method(op, Variable, jacobians = op_to_jacobians(op, locals()))
+
+try:
+    create_rl_bin_method('div', Variable, jacobians = op_to_jacobians('div', locals()))
+except NameError:
+    pass    # Python 3 has only truediv and floordiv
+
+# Binary operators eq not part of this set because it messes up having stochastics in lists 
+for op in ['lt', 'le', 'ne', 'gt', 'ge']:
+     create_bin_method(op ,Variable)
+    
+def equal(s1, s2): #makes up for deficiency of __eq__
+    return pm.Deterministic(lambda x1, x2 : x1 == x2,
+                            'A Deterministic returning the value of x1 == x2',
+                            '('+'_'.join([s1.__name__,'=',str(s2)])+')',
+                            {'x1':s1, 'x2':s2},
+                            trace=False,
+                            plot=False)
+
 
 # Unary operators
-for op in ['unicode','neg','pos','abs','invert','index']:
-    create_uni_method(op, Variable)
+neg_jacobians = {'self' : lambda self: -ones(shape(self))}
+
+pos_jacobians = {'self' : lambda self: np.ones(shape(self))}
+
+abs_jacobians = {'self' : lambda self: np.sign(self)}
+
+for op in ['neg','abs','invert']: # no need for pos and __index__ seems to cause a lot of problems
+    create_uni_method(op, Variable, jacobians = op_to_jacobians(op, locals()))
+
+# Casting operators
+for op in [iter,complex,int,float,oct,hex]:
+    create_casting_method(op, Variable)
+
+try:
+    create_casting_method(long, Variable)
+except NameError:
+    pass    # No long in Python 3
 
 # Addition, subtraction, multiplication
 # TODO: Uncomment once LinearCombination issues are ironed out.
@@ -645,35 +732,58 @@ for op in ['unicode','neg','pos','abs','invert','index']:
 # create_rl_lin_comb_method('rsub', Variable, ['self', 'other'], [-1,1])
 # create_rl_lin_comb_method('mul', Variable, ['self'],['other'])
 # create_rl_lin_comb_method('rmul', Variable, ['self'],['other'])
+
 #TODO: Comment once LinearCombination issues are ironed out.
+
+add_jacobians = {'a' : lambda a, b:  ones(broadcast(a,b).shape),
+                 'b' : lambda a, b:  ones(broadcast(a,b).shape)}
+
+mul_jacobians = {'a' : lambda a, b: ones(shape(a)) * b,
+                 'b' : lambda a, b: ones(shape(b)) * a}
+
+sub_jacobians = {'a' : lambda a, b:  ones(broadcast(a,b).shape),
+                 'b' : lambda a, b: -ones(broadcast(a,b).shape)}
+
 for op in ['add', 'mul', 'sub']:
-    create_rl_bin_method(op, Variable)
+    create_rl_bin_method(op, Variable, jacobians = op_to_jacobians(op, locals()))
+    
+for op in ['iadd','isub','imul','idiv','itruediv','ifloordiv','imod','ipow','ilshift','irshift','iand','ixor','ior','unicode']:
+    create_nonimplemented_method(op, Variable)
+
+
+def getitem_jacobian(self, index):
+    return index
 
 
 # Create __getitem__ method.
 def __getitem__(self, index):
+    if not check_special_methods():
+        raise NotImplementedError('Special method __index__ called on %s, but special methods have been disabled. Set pymc.special_methods_available to True to enable them.'%str(self))
     # If index is number or number-valued variable, make an Index object
-    name = '('+'_'.join([self.__name__,'getitem',str(index)])+')'
-    if isinstance(index, Variable):
-        if np.isscalar(index.value):
-            if np.isreal(index.value):
-                return Index(name, self, index)
-    elif np.isscalar(index):
-        if np.isreal(index):
+    name = '%s[%s]'%(self.__name__, str(index))
+    if np.isscalar(value(index)) and len(np.shape(self.value)) < 2:
+        if np.isreal(value(index)):
             return Index(name, self, index, trace=False, plot=False)
     # Otherwise make a standard Deterministic.
     def eval_fun(self, index):
         return self[index]
+    
+    jacobians = {'self' : getitem_jacobian}
+    jacobian_formats = {'self' : 'index_operation'}
     return pm.Deterministic(eval_fun,
-                            'A Deterministic returning the value of %s(%s,%s)'%('getitem',self.__name__, str(index)),
+                            'A Deterministic returning the value of %s[%s]'%(self.__name__, str(index)),
                             name,
                             {'self':self, 'index':index},
                             trace=False,
-                            plot=False)
+                            plot=False,
+                            jacobians = jacobians,
+                            jacobian_formats = jacobian_formats)
 Variable.__getitem__ = UnboundMethodType(__getitem__, None, Variable)
 
 # Create __call__ method for Variable.
 def __call__(self, *args, **kwargs):
+    if not check_special_methods():
+        raise NotImplementedError('Special method __call__ called on %s, but special methods have been disabled. Set pymc.special_methods_available to True to enable them.'%str(self))
     def eval_fun(self, args=args, kwargs=kwargs):
         return self(*args, **kwargs)
     return pm.Deterministic(eval_fun,
@@ -684,8 +794,19 @@ def __call__(self, *args, **kwargs):
                             plot=False)
 Variable.__call__ = UnboundMethodType(__call__, None, Variable)
 
+# def __getitem__(self, index):
+#     def eval_fun(self, index=index):
+#         return self.__getitem__[index]
+#     return pm.Deterministic(eval_fun,
+#                             'A Deterministic returning the value of %s[%s]'%(self.__name__, str(index)),
+#                             self.__name__+'[%s]'%str(index),
+#                             {'self':self, 'index': index},
+#                             trace=False,
+#                             plot=False)
+# Variable.__getitem__ = UnboundMethodType(__getitem__, None, Variable)
+
 
 # These are not working
-nonworking_ops = ['iter','complex','int','long','float','oct','hex','coerce','contains']
+# nonworking_ops = ['iter','complex','int','long','float','oct','hex','coerce','contains','len']
 # These should NOT be implemented because they are in-place updates.
-do_not_implement_ops = ['iadd','isub','imul','itruediv','ifloordiv','imod','ipow','ilshift','irshift','iand','ixor','ior']
+
