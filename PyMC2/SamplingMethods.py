@@ -1,7 +1,7 @@
 __docformat__='reStructuredText'
 from PyMCObjects import PyMCBase, Parameter, Node
 from utils import LikelihoodError
-from numpy import *
+from numpy import ones, zeros, log, shape, cov
 from numpy.linalg import cholesky, eigh
 from numpy.random import randint, random
 from numpy.random import normal as rnormal

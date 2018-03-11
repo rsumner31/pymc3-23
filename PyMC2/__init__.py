@@ -18,3 +18,7 @@ __modules__ = ["MCMC", "TimeSeries"]
 for mod in __modules__:
     exec "from %s import *" % mod
 del mod
+
+
+
+    

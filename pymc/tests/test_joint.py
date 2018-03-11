@@ -1,7 +1,9 @@
 from PyMC2 import Model, JointMetropolis
 from PyMC2.examples import model_for_joint
+from pylab import plot, show,title
 
-M = Model(model_for_joint)
+from numpy.testing import *
+PLOT=False
 
 M.sample(iter=50000,burn=0,thin=100)
 

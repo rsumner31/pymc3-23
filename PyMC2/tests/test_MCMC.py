@@ -4,6 +4,9 @@ The DisasterSampler example.
 .7s for 10k iterations with SamplingMethod,step() commented out,
 
 """
+from numpy.testing import *
+from pylab import plot, show,title
+PLOT=False
 
 from PyMC2 import Model
 from PyMC2.examples import DisasterModel
