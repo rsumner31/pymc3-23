@@ -23,7 +23,7 @@ class diagnostic(object):
     This decorator allows for PyMC arguments of various types to be passed to
     the diagnostic functions. It identifies the type of object and locates its
     trace(s), then passes the data to the wrapped diagnostic function.
-    
+
     """
     
     def __init__(self, all_chains=False):
@@ -240,7 +240,7 @@ def geweke(x, first=.1, last=.5, intervals=20):
     
     Notes
     -----
-    
+
     The Geweke score on some series x is computed by:
       
       .. math:: \frac{E[x_s] - E[x_e]}{\sqrt{V[x_s] + V[x_e]}}
@@ -248,7 +248,7 @@ def geweke(x, first=.1, last=.5, intervals=20):
     where :math:`E` stands for the mean, :math:`V` the variance,
     :math:`x_s` a section at the start of the series and
     :math:`x_e` a section at the end of the series.
-    
+
     References
     ----------
     Geweke (1992)
@@ -263,25 +263,25 @@ def geweke(x, first=.1, last=.5, intervals=20):
     
     # Initialize list of z-scores
     zscores = []
-    
+
     # Last index value
     end = len(x) - 1
-    
+
     # Calculate starting indices
     sindices = np.arange(0, end/2, step = int((end / 2) / (intervals-1)))
 
     # Loop over start indices
     for start in sindices:
-        
+
         # Calculate slices
         first_slice = x[start : start + int(first * (end - start))]
         last_slice = x[int(end - last * (end - start)):]
-        
+
         z = (first_slice.mean() - last_slice.mean())
         z /= np.sqrt(first_slice.std()**2 + last_slice.std()**2)
-        
+
         zscores.append([start, z])
-    
+
     if intervals == None:
         return zscores[0]
     else:
@@ -293,7 +293,7 @@ def raftery_lewis(x, q, r, s=.95, epsilon=.001, verbose=1):
     """
     Return the number of iterations needed to achieve a given
     precision.
-    
+
     :Parameters:
         x : sequence
             Sampled series.
@@ -325,10 +325,10 @@ def raftery_lewis(x, q, r, s=.95, epsilon=.001, verbose=1):
         kmind : int
             Minimum skip parameter sufficient to produce an independence
             chain.
-    
+
     :Example:
         >>> raftery_lewis(x, q=.025, r=.005)
-    
+
     :Reference:
         Raftery, A.E. and Lewis, S.M. (1995).  The number of iterations,
         convergence diagnostics and generic Metropolis algorithms.  In
@@ -341,7 +341,7 @@ def raftery_lewis(x, q, r, s=.95, epsilon=.001, verbose=1):
         return [raftery_lewis(y, q, r, s, epsilon, verbose) for y in np.transpose(x)]
     
     output = nmin, kthin, nburn, nprec, kmind = pymc.flib.gibbmain(x, q, r, s, epsilon)
-    
+
     if verbose:
         
         print_("\n========================")
@@ -363,7 +363,7 @@ def raftery_lewis(x, q, r, s=.95, epsilon=.001, verbose=1):
 def batch_means(x, f=lambda y:y, theta=.5, q=.95, burn=0):
     """
     TODO: Use Bayesian CI.
-    
+
     Returns the half-width of the frequentist confidence interval
     (q'th quantile) of the Monte Carlo estimate of E[f(x)].
     
@@ -388,7 +388,7 @@ def batch_means(x, f=lambda y:y, theta=.5, q=.95, burn=0):
     :Note:
         Requires SciPy
     """
-    
+
     try:
         import scipy
         from scipy import stats
@@ -396,17 +396,17 @@ def batch_means(x, f=lambda y:y, theta=.5, q=.95, burn=0):
         raise ImportError('SciPy must be installed to use batch_means.')
     
     x=x[burn:]
-    
+
     n = len(x)
     
     b = np.int(n**theta)
     a = n/b
-    
+
     t_quant = stats.t.isf(1-q,a-1)
-    
+
     Y = np.array([np.mean(f(x[i*b:(i+1)*b])) for i in xrange(a)])
     sig = b / (a-1.) * sum((Y - np.mean(f(x))) ** 2)
-    
+
     return t_quant * sig / np.sqrt(n)
 
 def discrepancy(observed, simulated, expected):

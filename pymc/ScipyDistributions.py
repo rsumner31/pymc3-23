@@ -53,7 +53,7 @@ def stochastic_from_scipy_dist(scipy_dist):
     """
     Return a Stochastic subclass made from a particular SciPy distribution.
     """
-    
+
     name = scipy_dist.__class__.__name__.replace('_gen','').capitalize()
 
     
@@ -92,7 +92,7 @@ def stochastic_from_scipy_dist(scipy_dist):
             return scipy_dist.rvs(*args,**kwds)
         else:
             return np.reshape(scipy_dist.rvs(*args,**kwds), shape)
-    
+
     # Build docstring from distribution
     docstr = name[0]+' = '+name + '(name, '+', '.join(parent_names)+', value=None, shape=None, trace=True, rseed=True, doc=None)\n\n'
     docstr += 'Stochastic variable with '+name+' distribution.\nParents are: '+', '.join(parent_names) + '.\n\n'
@@ -181,7 +181,7 @@ reporting the bug.
             """
             self.value = self.rv.ppf(q, *self._pymc_dists_to_value(self.args), **self.kwds)
             return self.value
-        
+
         def isf(self, q):
             """
             The inverse survival function of self conditional on parents.
@@ -189,7 +189,7 @@ reporting the bug.
             """
             self.value = self.rv.isf(q, *self._pymc_dists_to_value(self.args), **self.kwds)
             return self.value
-        
+
         def stats(self, moments='mv'):
             """The first few moments of self's distribution conditional on parents"""
             return self.rv.stats(moments=moments, *self._pymc_dists_to_value(self.args), **self.kwds)

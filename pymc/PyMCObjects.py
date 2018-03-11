@@ -631,7 +631,7 @@ class Stochastic(StochasticBase):
             
         self.counter = Counter()
         self.ParentDict = ParentDict
-        
+
         # Support legacy 'isdata' for a while
         if isdata is not None:
             print_("Deprecation Warning: the 'isdata' flag has been replaced by 'observed'. Please update your model accordingly.")
