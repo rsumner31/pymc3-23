@@ -1,30 +1,18 @@
-import collections
-import functools
-import itertools
-import threading
-import six
-
 import numpy as np
-import scipy.sparse as sps
-import theano.sparse as sparse
-from theano import theano, tensor as tt
+import theano
+import theano.tensor as tt
 from theano.tensor.var import TensorVariable
 
-from pymc3.theanof import set_theano_conf, floatX
 import pymc3 as pm
-from pymc3.math import flatten_list
-from .memoize import memoize, WithMemoization
-from .theanof import gradient, hessian, inputvars, generator
-from .vartypes import typefilter, discrete_types, continuous_types, isgenerator
+from .memoize import memoize
+from .theanof import gradient, hessian, inputvars
+from .vartypes import typefilter, discrete_types, continuous_types
 from .blocking import DictToArrayBijection, ArrayOrdering
-from .util import get_transformed_name
 
 __all__ = [
     'Model', 'Factor', 'compilef', 'fn', 'fastfn', 'modelcontext',
     'Point', 'Deterministic', 'Potential'
 ]
-
-FlatView = collections.namedtuple('FlatView', 'input, replacements, view')
 
 
 class InstanceMethod(object):
@@ -107,28 +95,20 @@ class Context(object):
     """Functionality for objects that put themselves in a context using
     the `with` statement.
     """
-    contexts = threading.local()
 
     def __enter__(self):
         type(self).get_contexts().append(self)
-        # self._theano_config is set in Model.__new__
-        if hasattr(self, '_theano_config'):
-            self._old_theano_config = set_theano_conf(self._theano_config)
         return self
 
     def __exit__(self, typ, value, traceback):
         type(self).get_contexts().pop()
-        # self._theano_config is set in Model.__new__
-        if hasattr(self, '_old_theano_config'):
-            set_theano_conf(self._old_theano_config)
 
     @classmethod
     def get_contexts(cls):
-        # no race-condition here, cls.contexts is a thread-local object
-        # be sure not to override contexts in a subclass however!
-        if not hasattr(cls.contexts, 'stack'):
-            cls.contexts.stack = []
-        return cls.contexts.stack
+        if not hasattr(cls, "contexts"):
+            cls.contexts = []
+
+        return cls.contexts
 
     @classmethod
     def get_context(cls):
@@ -152,9 +132,6 @@ class Factor(object):
     """Common functionality for objects with a log probability density
     associated with them.
     """
-    def __init__(self, *args, **kwargs):
-        super(Factor, self).__init__(*args, **kwargs)
-
     @property
     def logp(self):
         """Compiled log probability density function"""
@@ -173,18 +150,6 @@ class Factor(object):
         return self.model.fn(hessian(self.logpt, vars))
 
     @property
-    def logp_nojac(self):
-        return self.model.fn(self.logp_nojact)
-
-    def dlogp_nojac(self, vars=None):
-        """Compiled log density gradient function, without jacobian terms."""
-        return self.model.fn(gradient(self.logp_nojact, vars))
-
-    def d2logp_nojac(self, vars=None):
-        """Compiled log density hessian function, without jacobian terms."""
-        return self.model.fn(hessian(self.logp_nojact, vars))
-
-    @property
     def fastlogp(self):
         """Compiled log probability density function"""
         return self.model.fastfn(self.logpt)
@@ -198,425 +163,31 @@ class Factor(object):
         return self.model.fastfn(hessian(self.logpt, vars))
 
     @property
-    def fastlogp_nojac(self):
-        return self.model.fastfn(self.logp_nojact)
-
-    def fastdlogp_nojac(self, vars=None):
-        """Compiled log density gradient function, without jacobian terms."""
-        return self.model.fastfn(gradient(self.logp_nojact, vars))
-
-    def fastd2logp_nojac(self, vars=None):
-        """Compiled log density hessian function, without jacobian terms."""
-        return self.model.fastfn(hessian(self.logp_nojact, vars))
-
-    @property
     def logpt(self):
         """Theano scalar of log-probability of the model"""
-        if getattr(self, 'total_size', None) is not None:
-            logp = self.logp_sum_unscaledt * self.scaling
-        else:
-            logp = self.logp_sum_unscaledt
-        if self.name is not None:
-            logp.name = '__logp_%s' % self.name
-        return logp
-
-    @property
-    def logp_nojact(self):
-        """Theano scalar of log-probability, excluding jacobian terms."""
-        if getattr(self, 'total_size', None) is not None:
-            logp = tt.sum(self.logp_nojac_unscaledt) * self.scaling
-        else:
-            logp = tt.sum(self.logp_nojac_unscaledt)
-        if self.name is not None:
-            logp.name = '__logp_%s' % self.name
-        return logp
+        return tt.sum(self.logp_elemwiset)
 
 
-class InitContextMeta(type):
-    """Metaclass that executes `__init__` of instance in it's context"""
-    def __call__(cls, *args, **kwargs):
-        instance = cls.__new__(cls, *args, **kwargs)
-        with instance:  # appends context
-            instance.__init__(*args, **kwargs)
-        return instance
-
-
-def withparent(meth):
-    """Helper wrapper that passes calls to parent's instance"""
-    def wrapped(self, *args, **kwargs):
-        res = meth(self, *args, **kwargs)
-        if getattr(self, 'parent', None) is not None:
-            getattr(self.parent, meth.__name__)(*args, **kwargs)
-        return res
-    # Unfortunately functools wrapper fails
-    # when decorating built-in methods so we
-    # need to fix that improper behaviour
-    wrapped.__name__ = meth.__name__
-    return wrapped
-
-
-class treelist(list):
-    """A list that passes mutable extending operations used in Model
-    to parent list instance.
-    Extending treelist you will also extend its parent
-    """
-    def __init__(self, iterable=(), parent=None):
-        super(treelist, self).__init__(iterable)
-        assert isinstance(parent, list) or parent is None
-        self.parent = parent
-        if self.parent is not None:
-            self.parent.extend(self)
-    # typechecking here works bad
-    append = withparent(list.append)
-    __iadd__ = withparent(list.__iadd__)
-    extend = withparent(list.extend)
-
-    def tree_contains(self, item):
-        if isinstance(self.parent, treedict):
-            return (list.__contains__(self, item) or
-                    self.parent.tree_contains(item))
-        elif isinstance(self.parent, list):
-            return (list.__contains__(self, item) or
-                    self.parent.__contains__(item))
-        else:
-            return list.__contains__(self, item)
-
-    def __setitem__(self, key, value):
-        raise NotImplementedError('Method is removed as we are not'
-                                  ' able to determine '
-                                  'appropriate logic for it')
-
-    def __imul__(self, other):
-        t0 = len(self)
-        list.__imul__(self, other)
-        if self.parent is not None:
-            self.parent.extend(self[t0:])
-
-
-class treedict(dict):
-    """A dict that passes mutable extending operations used in Model
-    to parent dict instance.
-    Extending treedict you will also extend its parent
-    """
-    def __init__(self, iterable=(), parent=None, **kwargs):
-        super(treedict, self).__init__(iterable, **kwargs)
-        assert isinstance(parent, dict) or parent is None
-        self.parent = parent
-        if self.parent is not None:
-            self.parent.update(self)
-    # typechecking here works bad
-    __setitem__ = withparent(dict.__setitem__)
-    update = withparent(dict.update)
-
-    def tree_contains(self, item):
-        # needed for `add_random_variable` method
-        if isinstance(self.parent, treedict):
-            return (dict.__contains__(self, item) or
-                    self.parent.tree_contains(item))
-        elif isinstance(self.parent, dict):
-            return (dict.__contains__(self, item) or
-                    self.parent.__contains__(item))
-        else:
-            return dict.__contains__(self, item)
-
-
-class ValueGradFunction(object):
-    """Create a theano function that computes a value and its gradient.
-
-    Parameters
-    ----------
-    cost : theano variable
-        The value that we compute with its gradient.
-    grad_vars : list of named theano variables or None
-        The arguments with respect to which the gradient is computed.
-    extra_vars : list of named theano variables or None
-        Other arguments of the function that are assumed constant. They
-        are stored in shared variables and can be set using
-        `set_extra_values`.
-    dtype : str, default=theano.config.floatX
-        The dtype of the arrays.
-    casting : {'no', 'equiv', 'save', 'same_kind', 'unsafe'}, default='no'
-        Casting rule for casting `grad_args` to the array dtype.
-        See `numpy.can_cast` for a description of the options.
-        Keep in mind that we cast the variables to the array *and*
-        back from the array dtype to the variable dtype.
-    kwargs
-        Extra arguments are passed on to `theano.function`.
-
-    Attributes
-    ----------
-    size : int
-        The number of elements in the parameter array.
-    profile : theano profiling object or None
-        The profiling object of the theano function that computes value and
-        gradient. This is None unless `profile=True` was set in the
-        kwargs.
-    """
-    def __init__(self, cost, grad_vars, extra_vars=None, dtype=None,
-                 casting='no', **kwargs):
-        if extra_vars is None:
-            extra_vars = []
-
-        names = [arg.name for arg in grad_vars + extra_vars]
-        if any(name is None for name in names):
-            raise ValueError('Arguments must be named.')
-        if len(set(names)) != len(names):
-            raise ValueError('Names of the arguments are not unique.')
-
-        if cost.ndim > 0:
-            raise ValueError('Cost must be a scalar.')
-
-        self._grad_vars = grad_vars
-        self._extra_vars = extra_vars
-        self._extra_var_names = set(var.name for var in extra_vars)
-        self._cost = cost
-        self._ordering = ArrayOrdering(grad_vars)
-        self.size = self._ordering.size
-        self._extra_are_set = False
-        if dtype is None:
-            dtype = theano.config.floatX
-        self.dtype = dtype
-        for var in self._grad_vars:
-            if not np.can_cast(var.dtype, self.dtype, casting):
-                raise TypeError('Invalid dtype for variable %s. Can not '
-                                'cast to %s with casting rule %s.'
-                                % (var.name, self.dtype, casting))
-            if not np.issubdtype(var.dtype, np.floating):
-                raise TypeError('Invalid dtype for variable %s. Must be '
-                                'floating point but is %s.'
-                                % (var.name, var.dtype))
-
-        givens = []
-        self._extra_vars_shared = {}
-        for var in extra_vars:
-            shared = theano.shared(var.tag.test_value, var.name + '_shared__')
-            self._extra_vars_shared[var.name] = shared
-            givens.append((var, shared))
-
-        self._vars_joined, self._cost_joined = self._build_joined(
-            self._cost, grad_vars, self._ordering.vmap)
-
-        grad = tt.grad(self._cost_joined, self._vars_joined)
-        grad.name = '__grad'
-
-        inputs = [self._vars_joined]
-
-        self._theano_function = theano.function(
-            inputs, [self._cost_joined, grad], givens=givens, **kwargs)
-
-    def set_extra_values(self, extra_vars):
-        self._extra_are_set = True
-        for var in self._extra_vars:
-            self._extra_vars_shared[var.name].set_value(extra_vars[var.name])
-
-    def get_extra_values(self):
-        if not self._extra_are_set:
-            raise ValueError('Extra values are not set.')
-
-        return {var.name: self._extra_vars_shared[var.name].get_value()
-                for var in self._extra_vars}
-
-    def __call__(self, array, grad_out=None, extra_vars=None):
-        if extra_vars is not None:
-            self.set_extra_values(extra_vars)
-
-        if not self._extra_are_set:
-            raise ValueError('Extra values are not set.')
-
-        if array.shape != (self.size,):
-            raise ValueError('Invalid shape for array. Must be %s but is %s.'
-                             % ((self.size,), array.shape))
-
-        if grad_out is None:
-            out = np.empty_like(array)
-        else:
-            out = grad_out
-
-        logp, dlogp = self._theano_function(array)
-        if grad_out is None:
-            return logp, dlogp
-        else:
-            out[...] = dlogp
-            return logp
-
-    @property
-    def profile(self):
-        """Profiling information of the underlying theano function."""
-        return self._theano_function.profile
-
-    def dict_to_array(self, point):
-        """Convert a dictionary with values for grad_vars to an array."""
-        array = np.empty(self.size, dtype=self.dtype)
-        for varmap in self._ordering.vmap:
-            array[varmap.slc] = point[varmap.var].ravel().astype(self.dtype)
-        return array
-
-    def array_to_dict(self, array):
-        """Convert an array to a dictionary containing the grad_vars."""
-        if array.shape != (self.size,):
-            raise ValueError('Array should have shape (%s,) but has %s'
-                             % (self.size, array.shape))
-        if array.dtype != self.dtype:
-            raise ValueError('Array has invalid dtype. Should be %s but is %s'
-                             % (self._dtype, self.dtype))
-        point = {}
-        for varmap in self._ordering.vmap:
-            data = array[varmap.slc].reshape(varmap.shp)
-            point[varmap.var] = data.astype(varmap.dtyp)
-
-        return point
-
-    def array_to_full_dict(self, array):
-        """Convert an array to a dictionary with grad_vars and extra_vars."""
-        point = self.array_to_dict(array)
-        for name, var in self._extra_vars_shared.items():
-            point[name] = var.get_value()
-        return point
-
-    def _build_joined(self, cost, args, vmap):
-        args_joined = tt.vector('__args_joined')
-        args_joined.tag.test_value = np.zeros(self.size, dtype=self.dtype)
-
-        joined_slices = {}
-        for vmap in vmap:
-            sliced = args_joined[vmap.slc].reshape(vmap.shp)
-            sliced.name = vmap.var
-            joined_slices[vmap.var] = sliced
-
-        replace = {var: joined_slices[var.name] for var in args}
-        return args_joined, theano.clone(cost, replace=replace)
-
-
-class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization)):
+class Model(Context, Factor):
     """Encapsulates the variables and likelihood factors of a model.
 
-    Model class can be used for creating class based models. To create
-    a class based model you should inherit from `Model` and
-    override `__init__` with arbitrary definitions
-    (do not forget to call base class `__init__` first).
-
     Parameters
     ----------
-    name : str, default '' - name that will be used as prefix for
-        names of all random variables defined within model
-    model : Model, default None - instance of Model that is
-        supposed to be a parent for the new instance. If None,
-        context will be used. All variables defined within instance
-        will be passed to the parent instance. So that 'nested' model
-        contributes to the variables and likelihood factors of
-        parent model.
-    theano_config : dict, default=None
-        A dictionary of theano config values that should be set
-        temporarily in the model context. See the documentation
-        of theano for a complete list. Set `compute_test_value` to
-        `raise` if it is None.
-
-    Examples
-    --------
-    # How to define a custom model
-    class CustomModel(Model):
-        # 1) override init
-        def __init__(self, mean=0, sd=1, name='', model=None):
-            # 2) call super's init first, passing model and name to it
-            # name will be prefix for all variables here
-            # if no name specified for model there will be no prefix
-            super(CustomModel, self).__init__(name, model)
-            # now you are in the context of instance,
-            # `modelcontext` will return self
-            # you can define variables in several ways
-            # note, that all variables will get model's name prefix
-
-            # 3) you can create variables with Var method
-            self.Var('v1', Normal.dist(mu=mean, sd=sd))
-            # this will create variable named like '{prefix_}v1'
-            # and assign attribute 'v1' to instance
-            # created variable can be accessed with self.v1 or self['v1']
-
-            # 4) this syntax will also work as we are in the context
-            # of instance itself, names are given as usual
-            Normal('v2', mu=mean, sd=sd)
-
-            # something more complex is allowed too
-            Normal('v3', mu=mean, sd=HalfCauchy('sd', beta=10, testval=1.))
-
-            # Deterministic variables can be used in usual way
-            Deterministic('v3_sq', self.v3 ** 2)
-            # Potentials too
-            Potential('p1', tt.constant(1))
-
-    # After defining a class CustomModel you can use it in several ways
-
-    # I:
-    #   state the model within a context
-    with Model() as model:
-        CustomModel()
-        # arbitrary actions
-
-    # II:
-    #   use new class as entering point in context
-    with CustomModel() as model:
-        Normal('new_normal_var', mu=1, sd=0)
-
-    # III:
-    #   just get model instance with all that was defined in it
-    model = CustomModel()
-
-    # IV:
-    #   use many custom models within one context
-    with Model() as model:
-        CustomModel(mean=1, name='first')
-        CustomModel(mean=2, name='second')
+    verbose : int
+        Model verbosity setting, determining how much feedback various
+        operations provide. Normal verbosity is verbose=1 (default), silence
+        is verbose=0, high is any value greater than 1.
     """
-    def __new__(cls, *args, **kwargs):
-        # resolves the parent instance
-        instance = object.__new__(cls)
-        if kwargs.get('model') is not None:
-            instance._parent = kwargs.get('model')
-        elif cls.get_contexts():
-            instance._parent = cls.get_contexts()[-1]
-        else:
-            instance._parent = None
-        theano_config = kwargs.get('theano_config', None)
-        if theano_config is None or 'compute_test_value' not in theano_config:
-            theano_config = {'compute_test_value': 'raise'}
-        instance._theano_config = theano_config
-        return instance
 
-    def __init__(self, name='', model=None, theano_config=None):
-        self.name = name
-        if self.parent is not None:
-            self.named_vars = treedict(parent=self.parent.named_vars)
-            self.free_RVs = treelist(parent=self.parent.free_RVs)
-            self.observed_RVs = treelist(parent=self.parent.observed_RVs)
-            self.deterministics = treelist(parent=self.parent.deterministics)
-            self.potentials = treelist(parent=self.parent.potentials)
-            self.missing_values = treelist(parent=self.parent.missing_values)
-        else:
-            self.named_vars = treedict()
-            self.free_RVs = treelist()
-            self.observed_RVs = treelist()
-            self.deterministics = treelist()
-            self.potentials = treelist()
-            self.missing_values = treelist()
-
-    @property
-    def model(self):
-        return self
-
-    @property
-    def parent(self):
-        return self._parent
-
-    @property
-    def root(self):
-        model = self
-        while not model.isroot:
-            model = model.parent
-        return model
-
-    @property
-    def isroot(self):
-        return self.parent is None
+    def __init__(self, verbose=1):
+        self.named_vars = {}
+        self.free_RVs = []
+        self.observed_RVs = []
+        self.deterministics = []
+        self.potentials = []
+        self.missing_values = []
+        self.model = self
+        self.verbose = verbose
 
     @property
     @memoize
@@ -629,67 +200,34 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         return bij
 
     @property
+    @memoize
     def dict_to_array(self):
         return self.bijection.map
 
     @property
-    def ndim(self):
-        return sum(var.dsize for var in self.free_RVs)
-
-    @property
+    @memoize
     def logp_array(self):
         return self.bijection.mapf(self.fastlogp)
 
     @property
+    @memoize
     def dlogp_array(self):
         vars = inputvars(self.cont_vars)
         return self.bijection.mapf(self.fastdlogp(vars))
 
-    def logp_dlogp_function(self, grad_vars=None, **kwargs):
-        if grad_vars is None:
-            grad_vars = list(typefilter(self.free_RVs, continuous_types))
-        else:
-            for var in grad_vars:
-                if var.dtype not in continuous_types:
-                    raise ValueError("Can only compute the gradient of "
-                                     "continuous types: %s" % var)
-        varnames = [var.name for var in grad_vars]
-        extra_vars = [var for var in self.free_RVs if var.name not in varnames]
-        return ValueGradFunction(self.logpt, grad_vars, extra_vars, **kwargs)
-
     @property
+    @memoize
     def logpt(self):
         """Theano scalar of log-probability of the model"""
-        with self:
-            factors = [var.logpt for var in self.basic_RVs]
-            logp_factors = tt.sum(factors)
-            logp_potentials = tt.sum([tt.sum(pot) for pot in self.potentials])
-            logp = logp_factors + logp_potentials
-            if self.name:
-                logp.name = '__logp_%s' % self.name
-            else:
-                logp.name = '__logp'
-            return logp
-
-    @property
-    def logp_nojact(self):
-        """Theano scalar of log-probability of the model"""
-        with self:
-            factors = [var.logp_nojact for var in self.basic_RVs] + self.potentials
-            logp = tt.sum([tt.sum(factor) for factor in factors])
-            if self.name:
-                logp.name = '__logp_nojac_%s' % self.name
-            else:
-                logp.name = '__logp_nojac'
-            return logp
+        factors = [var.logpt for var in self.basic_RVs] + self.potentials
+        return tt.add(*map(tt.sum, factors))
 
     @property
     def varlogpt(self):
         """Theano scalar of log-probability of the unobserved random variables
            (excluding deterministic)."""
-        with self:
-            factors = [var.logpt for var in self.vars]
-            return tt.sum(factors)
+        factors = [var.logpt for var in self.vars]
+        return tt.add(*map(tt.sum, factors))
 
     @property
     def vars(self):
@@ -703,7 +241,7 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         """List of random variables the model is defined in terms of
         (which excludes deterministics).
         """
-        return self.free_RVs + self.observed_RVs
+        return (self.free_RVs + self.observed_RVs)
 
     @property
     def unobserved_RVs(self):
@@ -726,7 +264,7 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         """All the continuous variables in the model"""
         return list(typefilter(self.vars, continuous_types))
 
-    def Var(self, name, dist, data=None, total_size=None):
+    def Var(self, name, dist, data=None):
         """Create and add (un)observed random variable to the model with an
         appropriate prior distribution.
 
@@ -737,38 +275,29 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         data : array_like (optional)
            If data is provided, the variable is observed. If None,
            the variable is unobserved.
-        total_size : scalar
-            upscales logp of variable with :math:`coef = total_size/var.shape[0]`
 
         Returns
         -------
         FreeRV or ObservedRV
         """
-        name = self.name_for(name)
         if data is None:
             if getattr(dist, "transform", None) is None:
-                with self:
-                    var = FreeRV(name=name, distribution=dist,
-                                 total_size=total_size, model=self)
+                var = FreeRV(name=name, distribution=dist, model=self)
                 self.free_RVs.append(var)
             else:
-                with self:
-                    var = TransformedRV(name=name, distribution=dist,
-                                        transform=dist.transform,
-                                        total_size=total_size,
-                                        model=self)
-                pm._log.debug('Applied {transform}-transform to {name}'
-                              ' and added transformed {orig_name} to model.'.format(
-                                transform=dist.transform.name,
-                                name=name,
-                                orig_name=get_transformed_name(name, dist.transform)))
+                var = TransformedRV(name=name, distribution=dist, model=self,
+                                    transform=dist.transform)
+                if self.verbose:
+                    pm._log.info('Applied {transform}-transform to {name}'
+                                 ' and added transformed {orig_name} to model.'.format(
+                                    transform=dist.transform.name,
+                                    name=name,
+                                    orig_name='{}_{}_'.format(name, dist.transform.name)))
                 self.deterministics.append(var)
-                self.add_random_variable(var)
                 return var
         elif isinstance(data, dict):
-            with self:
-                var = MultiObservedRV(name=name, data=data, distribution=dist,
-                                      total_size=total_size, model=self)
+            var = MultiObservedRV(name=name, data=data, distribution=dist,
+                                  model=self)
             self.observed_RVs.append(var)
             if var.missing_values:
                 self.free_RVs += var.missing_values
@@ -776,10 +305,8 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
                 for v in var.missing_values:
                     self.named_vars[v.name] = v
         else:
-            with self:
-                var = ObservedRV(name=name, data=data,
-                                 distribution=dist,
-                                 total_size=total_size, model=self)
+            var = ObservedRV(name=name, data=data,
+                             distribution=dist, model=self)
             self.observed_RVs.append(var)
             if var.missing_values:
                 self.free_RVs.append(var.missing_values)
@@ -791,47 +318,17 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
 
     def add_random_variable(self, var):
         """Add a random variable to the named variables of the model."""
-        if self.named_vars.tree_contains(var.name):
+        if var.name in self.named_vars:
             raise ValueError(
                 "Variable name {} already exists.".format(var.name))
         self.named_vars[var.name] = var
-        if not hasattr(self, self.name_of(var.name)):
-            setattr(self, self.name_of(var.name), var)
-
-    @property
-    def prefix(self):
-        return '%s_' % self.name if self.name else ''
-
-    def name_for(self, name):
-        """Checks if name has prefix and adds if needed
-        """
-        if self.prefix:
-            if not name.startswith(self.prefix):
-                return '{}{}'.format(self.prefix, name)
-            else:
-                return name
-        else:
-            return name
-
-    def name_of(self, name):
-        """Checks if name has prefix and deletes if needed
-        """
-        if not self.prefix or not name:
-            return name
-        elif name.startswith(self.prefix):
-            return name[len(self.prefix):]
-        else:
-            return name
+        if not hasattr(self, var.name):
+            setattr(self, var.name, var)
 
     def __getitem__(self, key):
-        try:
-            return self.named_vars[key]
-        except KeyError as e:
-            try:
-                return self.named_vars[self.name_for(key)]
-            except KeyError:
-                raise e
+        return self.named_vars[key]
 
+    @memoize
     def makefn(self, outs, mode=None, *args, **kwargs):
         """Compiles a Theano function which returns `outs` and takes the variable
         ancestors of `outs` as inputs.
@@ -845,12 +342,11 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         -------
         Compiled Theano function
         """
-        with self:
-            return theano.function(self.vars, outs,
-                                   allow_input_downcast=True,
-                                   on_unused_input='ignore',
-                                   accept_inplace=True,
-                                   mode=mode, *args, **kwargs)
+        return theano.function(self.vars, outs,
+                               allow_input_downcast=True,
+                               on_unused_input='ignore',
+                               accept_inplace=True,
+                               mode=mode, *args, **kwargs)
 
     def fn(self, outs, mode=None, *args, **kwargs):
         """Compiles a Theano function which returns the values of `outs`
@@ -907,62 +403,10 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         if point is None:
             point = self.test_point
 
-        for _ in range(n):
+        for i in range(n):
             f(**point)
 
         return f.profile
-
-    def flatten(self, vars=None, order=None, inputvar=None):
-        """Flattens model's input and returns:
-            FlatView with
-            * input vector variable
-            * replacements `input_var -> vars`
-            * view {variable: VarMap}
-
-        Parameters
-        ----------
-        vars : list of variables or None
-            if None, then all model.free_RVs are used for flattening input
-        order : ArrayOrdering
-            Optional, use predefined ordering
-        inputvar : tt.vector
-            Optional, use predefined inputvar
-
-        Returns
-        -------
-        flat_view
-        """
-        if vars is None:
-            vars = self.free_RVs
-        if order is None:
-            order = ArrayOrdering(vars)
-        if inputvar is None:
-            inputvar = tt.vector('flat_view', dtype=theano.config.floatX)
-            if theano.config.compute_test_value != 'off':
-                if vars:
-                    inputvar.tag.test_value = flatten_list(vars).tag.test_value
-                else:
-                    inputvar.tag.test_value = np.asarray([], inputvar.dtype)
-        replacements = {self.named_vars[name]: inputvar[slc].reshape(shape).astype(dtype)
-                        for name, slc, shape, dtype in order.vmap}
-        view = {vm.var: vm for vm in order.vmap}
-        flat_view = FlatView(inputvar, replacements, view)
-        return flat_view
-
-    def _repr_latex_(self, name=None, dist=None):
-        tex_vars = []
-        for rv in itertools.chain(self.unobserved_RVs, self.observed_RVs):
-            rv_tex = rv.__latex__()
-            if rv_tex is not None:
-                array_rv = rv_tex.replace(r'\sim', r'&\sim &').strip('$')
-                tex_vars.append(array_rv)
-        return r'''$$
-            \begin{{array}}{{rcl}}
-            {}
-            \end{{array}}
-            $$'''.format('\\\\'.join(tex_vars))
-
-    __latex__ = _repr_latex_
 
 
 def fn(outs, mode=None, model=None, *args, **kwargs):
@@ -1044,68 +488,11 @@ class LoosePointFunc(object):
 compilef = fastfn
 
 
-def _get_scaling(total_size, shape, ndim):
-    """
-    Gets scaling constant for logp
-
-    Parameters
-    ----------
-    total_size : int or list[int]
-    shape : shape
-        shape to scale
-    ndim : int
-        ndim hint
-
-    Returns
-    -------
-    scalar
-    """
-    if total_size is None:
-        coef = floatX(1)
-    elif isinstance(total_size, int):
-        if ndim >= 1:
-            denom = shape[0]
-        else:
-            denom = 1
-        coef = floatX(total_size) / floatX(denom)
-    elif isinstance(total_size, (list, tuple)):
-        if not all(isinstance(i, int) for i in total_size if (i is not Ellipsis and i is not None)):
-            raise TypeError('Unrecognized `total_size` type, expected '
-                            'int or list of ints, got %r' % total_size)
-        if Ellipsis in total_size:
-            sep = total_size.index(Ellipsis)
-            begin = total_size[:sep]
-            end = total_size[sep+1:]
-            if Ellipsis in end:
-                raise ValueError('Double Ellipsis in `total_size` is restricted, got %r' % total_size)
-        else:
-            begin = total_size
-            end = []
-        if (len(begin) + len(end)) > ndim:
-            raise ValueError('Length of `total_size` is too big, '
-                             'number of scalings is bigger that ndim, got %r' % total_size)
-        elif (len(begin) + len(end)) == 0:
-            return floatX(1)
-        if len(end) > 0:
-            shp_end = shape[-len(end):]
-        else:
-            shp_end = np.asarray([])
-        shp_begin = shape[:len(begin)]
-        begin_coef = [floatX(t) / shp_begin[i] for i, t in enumerate(begin) if t is not None]
-        end_coef = [floatX(t) / shp_end[i] for i, t in enumerate(end) if t is not None]
-        coefs = begin_coef + end_coef
-        coef = tt.prod(coefs)
-    else:
-        raise TypeError('Unrecognized `total_size` type, expected '
-                        'int or list of ints, got %r' % total_size)
-    return tt.as_tensor(floatX(coef))
-
-
 class FreeRV(Factor, TensorVariable):
     """Unobserved random variable that a model is specified in terms of."""
 
     def __init__(self, type=None, owner=None, index=None, name=None,
-                 distribution=None, total_size=None, model=None):
+                 distribution=None, model=None):
         """
         Parameters
         ----------
@@ -1113,10 +500,7 @@ class FreeRV(Factor, TensorVariable):
         owner : theano owner (optional)
         name : str
         distribution : Distribution
-        model : Model
-        total_size : scalar Tensor (optional)
-            needed for upscaling logp
-        """
+        model : Model"""
         if type is None:
             type = distribution.type
         super(FreeRV, self).__init__(type, owner, index, name)
@@ -1128,28 +512,11 @@ class FreeRV(Factor, TensorVariable):
             self.tag.test_value = np.ones(
                 distribution.shape, distribution.dtype) * distribution.default()
             self.logp_elemwiset = distribution.logp(self)
-            # The logp might need scaling in minibatches.
-            # This is done in `Factor`.
-            self.logp_sum_unscaledt = distribution.logp_sum(self)
-            self.logp_nojac_unscaledt = distribution.logp_nojac(self)
-            self.total_size = total_size
             self.model = model
-            self.scaling = _get_scaling(total_size, self.shape, self.ndim)
 
             incorporate_methods(source=distribution, destination=self,
                                 methods=['random'],
                                 wrapper=InstanceMethod)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if self.distribution is None:
-            return None
-        if name is None:
-            name = self.name
-        if dist is None:
-            dist = self.distribution
-        return self.distribution._repr_latex_(name=name, dist=dist)
-
-    __latex__ = _repr_latex_
 
     @property
     def init_value(self):
@@ -1160,20 +527,15 @@ class FreeRV(Factor, TensorVariable):
 def pandas_to_array(data):
     if hasattr(data, 'values'):  # pandas
         if data.isnull().any().any():  # missing values
-            ret = np.ma.MaskedArray(data.values, data.isnull().values)
+            return np.ma.MaskedArray(data.values, data.isnull().values)
         else:
-            ret = data.values
+            return data.values
     elif hasattr(data, 'mask'):
-        ret = data
+        return data
     elif isinstance(data, theano.gof.graph.Variable):
-        ret = data
-    elif sps.issparse(data):
-        ret = data
-    elif isgenerator(data):
-        ret = generator(data)
+        return data
     else:
-        ret = np.asarray(data)
-    return pm.smartfloatX(ret)
+        return np.asarray(data)
 
 
 def as_tensor(data, name, model, distribution):
@@ -1182,7 +544,7 @@ def as_tensor(data, name, model, distribution):
 
     if hasattr(data, 'mask'):
         from .distributions import NoDistribution
-        testval = np.broadcast_to(distribution.default(), data.shape)[data.mask]
+        testval = distribution.testval or data.mean().astype(dtype)
         fakedist = NoDistribution.dist(shape=data.mask.sum(), dtype=dtype,
                                        testval=testval, parent_dist=distribution)
         missing_values = FreeRV(name=name + '_missing', distribution=fakedist,
@@ -1193,10 +555,6 @@ def as_tensor(data, name, model, distribution):
             constant[data.mask.nonzero()], missing_values)
         dataTensor.missing_values = missing_values
         return dataTensor
-    elif sps.issparse(data):
-        data = sparse.basic.as_sparse(data, name=name)
-        data.missing_values = None
-        return data
     else:
         data = tt.as_tensor_variable(data, name=name)
         data.missing_values = None
@@ -1209,7 +567,7 @@ class ObservedRV(Factor, TensorVariable):
     """
 
     def __init__(self, type=None, owner=None, index=None, name=None, data=None,
-                 distribution=None, total_size=None, model=None):
+                 distribution=None, model=None):
         """
         Parameters
         ----------
@@ -1218,47 +576,28 @@ class ObservedRV(Factor, TensorVariable):
         name : str
         distribution : Distribution
         model : Model
-        total_size : scalar Tensor (optional)
-            needed for upscaling logp
         """
         from .distributions import TensorType
         if type is None:
             data = pandas_to_array(data)
             type = TensorType(distribution.dtype, data.shape)
 
-        self.observations = data
-
-        super(ObservedRV, self).__init__(type, owner, index, name)
+        super(TensorVariable, self).__init__(type, None, None, name)
 
         if distribution is not None:
-            data = as_tensor(data, name, model, distribution)
 
+            data = as_tensor(data, name, model, distribution)
             self.missing_values = data.missing_values
+
             self.logp_elemwiset = distribution.logp(data)
-            # The logp might need scaling in minibatches.
-            # This is done in `Factor`.
-            self.logp_sum_unscaledt = distribution.logp_sum(data)
-            self.logp_nojac_unscaledt = distribution.logp_nojac(data)
-            self.total_size = total_size
             self.model = model
             self.distribution = distribution
 
             # make this RV a view on the combined missing/nonmissing array
             theano.gof.Apply(theano.compile.view_op,
                              inputs=[data], outputs=[self])
+
             self.tag.test_value = theano.compile.view_op(data).tag.test_value
-            self.scaling = _get_scaling(total_size, data.shape, data.ndim)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if self.distribution is None:
-            return None
-        if name is None:
-            name = self.name
-        if dist is None:
-            dist = self.distribution
-        return self.distribution._repr_latex_(name=name, dist=dist)
-
-    __latex__ = _repr_latex_
 
     @property
     def init_value(self):
@@ -1271,7 +610,7 @@ class MultiObservedRV(Factor):
     Potentially partially observed.
     """
 
-    def __init__(self, name, data, distribution, total_size=None, model=None):
+    def __init__(self, name, data, distribution, model):
         """
         Parameters
         ----------
@@ -1280,44 +619,16 @@ class MultiObservedRV(Factor):
         name : str
         distribution : Distribution
         model : Model
-        total_size : scalar Tensor (optional)
-            needed for upscaling logp
         """
         self.name = name
         self.data = {name: as_tensor(data, name, model, distribution)
                      for name, data in data.items()}
 
-        self.missing_values = [datum.missing_values for datum in self.data.values()
-                               if datum.missing_values is not None]
+        self.missing_values = [data.missing_values for data in self.data.values()
+                               if data.missing_values is not None]
         self.logp_elemwiset = distribution.logp(**self.data)
-        # The logp might need scaling in minibatches.
-        # This is done in `Factor`.
-        self.logp_sum_unscaledt = distribution.logp_sum(**self.data)
-        self.logp_nojac_unscaledt = distribution.logp_nojac(**self.data)
-        self.total_size = total_size
         self.model = model
         self.distribution = distribution
-        self.scaling = _get_scaling(total_size, self.logp_elemwiset.shape, self.logp_elemwiset.ndim)
-
-
-def _walk_up_rv(rv):
-    """Walk up theano graph to get inputs for deterministic RV."""
-    all_rvs = []
-    parents = list(itertools.chain(*[j.inputs for j in rv.get_parents()]))
-    if parents:
-        for parent in parents:
-            all_rvs.extend(_walk_up_rv(parent))
-    else:
-        if rv.name:
-            all_rvs.append(r'\text{%s}' % rv.name)
-        else:
-            all_rvs.append(r'\text{Constant}')
-    return all_rvs
-
-
-def _latex_repr_rv(rv):
-    """Make latex string for a Deterministic variable"""
-    return r'$\text{%s} \sim \text{Deterministic}(%s)$' % (rv.name, r',~'.join(_walk_up_rv(rv)))
 
 
 def Deterministic(name, var, model=None):
@@ -1330,14 +641,11 @@ def Deterministic(name, var, model=None):
 
     Returns
     -------
-    var : var, with name attribute
+    n : var but with name name
     """
-    model = modelcontext(model)
-    var.name = model.name_for(name)
-    model.deterministics.append(var)
-    model.add_random_variable(var)
-    var._repr_latex_ = functools.partial(_latex_repr_rv, var)
-    var.__latex__ = var._repr_latex_
+    var.name = name
+    modelcontext(model).deterministics.append(var)
+    modelcontext(model).add_random_variable(var)
     return var
 
 
@@ -1353,65 +661,45 @@ def Potential(name, var, model=None):
     -------
     var : var, with name attribute
     """
-    model = modelcontext(model)
-    var.name = model.name_for(name)
-    model.potentials.append(var)
-    model.add_random_variable(var)
+    var.name = name
+    modelcontext(model).potentials.append(var)
     return var
 
 
 class TransformedRV(TensorVariable):
 
     def __init__(self, type=None, owner=None, index=None, name=None,
-                 distribution=None, model=None, transform=None,
-                 total_size=None):
+                 distribution=None, model=None, transform=None):
         """
         Parameters
         ----------
 
         type : theano type (optional)
         owner : theano owner (optional)
+
         name : str
         distribution : Distribution
-        model : Model
-        total_size : scalar Tensor (optional)
-            needed for upscaling logp
-        """
+        model : Model"""
         if type is None:
             type = distribution.type
         super(TransformedRV, self).__init__(type, owner, index, name)
 
-        self.transformation = transform
-
         if distribution is not None:
             self.model = model
-            self.distribution = distribution
 
-            transformed_name = get_transformed_name(name, transform)
-
+            transformed_name = "{}_{}_".format(name, transform.name)
             self.transformed = model.Var(
-                transformed_name, transform.apply(distribution), total_size=total_size)
+                transformed_name, transform.apply(distribution))
 
             normalRV = transform.backward(self.transformed)
 
             theano.Apply(theano.compile.view_op, inputs=[
                          normalRV], outputs=[self])
             self.tag.test_value = normalRV.tag.test_value
-            self.scaling = _get_scaling(total_size, self.shape, self.ndim)
+
             incorporate_methods(source=distribution, destination=self,
                                 methods=['random'],
                                 wrapper=InstanceMethod)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if self.distribution is None:
-            return None
-        if name is None:
-            name = self.name
-        if dist is None:
-            dist = self.distribution
-        return self.distribution._repr_latex_(name=name, dist=dist)
-
-    __latex__ = _repr_latex_
 
     @property
     def init_value(self):
@@ -1425,12 +713,6 @@ def as_iterargs(data):
     else:
         return [data]
 
-
-def all_continuous(vars):
-    """Check that vars not include discrete variables, excepting ObservedRVs.
-    """
-    vars_ = [var for var in vars if not isinstance(var, pm.model.ObservedRV)]
-    if any([var.dtype in pm.discrete_types for var in vars_]):
-        return False
-    else:
-        return True
+# theano stuff
+theano.config.warn.sum_div_dimshuffle_bug = False
+theano.config.compute_test_value = 'raise'

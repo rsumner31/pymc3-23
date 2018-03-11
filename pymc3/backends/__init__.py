@@ -34,7 +34,7 @@ backend object with a variable or variable name.
 
 The call will return the sampling values of `x`, with the values for
 all chains concatenated. (For a single call to `sample`, the number of
-chains will correspond to the `cores` argument.)
+chains will correspond to the `njobs` argument.)
 
 To discard the first N values of each chain, slicing syntax can be
 used.
@@ -116,11 +116,8 @@ For specific examples, see pymc3.backends.{ndarray,text,sqlite}.py.
 from ..backends.ndarray import NDArray
 from ..backends.text import Text
 from ..backends.sqlite import SQLite
-from ..backends.hdf5 import HDF5
 
 _shortcuts = {'text': {'backend': Text,
                        'name': 'mcmc'},
               'sqlite': {'backend': SQLite,
-                         'name': 'mcmc.sqlite'},
-              'hdf5': {'backend': HDF5,
-                       'name': 'mcmc.hdf5'}}
+                         'name': 'mcmc.sqlite'}}

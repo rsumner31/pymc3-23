@@ -21,9 +21,9 @@ def test_functions():
     psi = function([x], ps.psi(x))
     function([x, p], ps.multigammaln(x, p))
     for x in xvals:
-        check_vals(gammaln, ss.gammaln, x)
+        yield check_vals, gammaln, ss.gammaln, x
     for x in xvals[1:]:
-        check_vals(psi, ss.psi, x)
+        yield check_vals, psi, ss.psi, x
 
 """
 scipy.special.multigammaln gives bad values if you pass a non scalar to a
@@ -52,7 +52,7 @@ def t_multigamma():
 
     for p in [0, 1, 2, 3, 4, 100]:
         for x in xvals:
-            check_vals(multigammaln, ssmultigammaln, x, p)
+            yield check_vals, multigammaln, ssmultigammaln, x, p
 
 
 def check_vals(fn1, fn2, *args):

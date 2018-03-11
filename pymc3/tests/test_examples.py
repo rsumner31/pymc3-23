@@ -2,10 +2,8 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import pymc3 as pm
+import scipy.optimize as opt
 import theano.tensor as tt
-import pytest
-import theano
-from pymc3.theanof import floatX
 
 from .helpers import SeededTest
 
@@ -14,8 +12,8 @@ matplotlib.use('Agg', warn=False)
 
 def get_city_data():
     """Helper to get city data"""
-    data = pd.read_csv(pm.get_data('srrs2.dat'))
-    cty_data = pd.read_csv(pm.get_data('cty.dat'))
+    data = pd.read_csv(pm.get_data_file('pymc3.examples', 'data/srrs2.dat'))
+    cty_data = pd.read_csv(pm.get_data_file('pymc3.examples', 'data/cty.dat'))
 
     data = data[data.state == 'MN']
 
@@ -30,11 +28,10 @@ def get_city_data():
     return data.merge(unique, 'inner', on='fips')
 
 
-class TestARM5_4(SeededTest):
+class ARM5_4(SeededTest):
     def build_model(self):
-        data = pd.read_csv(pm.get_data('wells.dat'),
-                           delimiter=u' ', index_col=u'id',
-                           dtype={u'switch': np.int8})
+        wells = pm.get_data_file('pymc3.examples', 'data/wells.dat')
+        data = pd.read_csv(wells, delimiter=u' ', index_col=u'id', dtype={u'switch': np.int8})
         data.dist /= 100
         data.educ /= 4
         col = data.columns
@@ -43,15 +40,21 @@ class TestARM5_4(SeededTest):
         P['1'] = 1
 
         with pm.Model() as model:
-            effects = pm.Normal('effects', mu=0, sd=100, shape=len(P.columns))
-            logit_p = tt.dot(floatX(np.array(P)), effects)
-            pm.Bernoulli('s', logit_p=logit_p, observed=floatX(data.switch.values))
+            effects = pm.Normal('effects', mu=0, tau=100. ** -2, shape=len(P.columns))
+            p = tt.nnet.sigmoid(tt.dot(np.array(P), effects))
+            pm.Bernoulli('s', p, observed=np.array(data.switch))
         return model
 
     def test_run(self):
         model = self.build_model()
         with model:
-            pm.sample(50, tune=50)
+            # move the chain to the MAP which should be a good starting point
+            start = pm.find_MAP()
+            H = model.fastd2logp()  # find a good orientation using the hessian at the MAP
+            h = H(start)
+
+            step = pm.HamiltonianMC(model.vars, h)
+            pm.sample(50, step, start)
 
 
 class TestARM12_6(SeededTest):
@@ -76,16 +79,16 @@ class TestARM12_6(SeededTest):
     def too_slow(self):
         model = self.build_model()
         start = {'groupmean': self.obs_means.mean(),
-                 'groupsd_interval__': 0,
-                 'sd_interval__': 0,
+                 'groupsd_interval_': 0,
+                 'sd_interval_': 0,
                  'means': self.obs_means,
                  'floor_m': 0.,
                  }
         with model:
             start = pm.find_MAP(start=start,
-                                vars=[model['groupmean'], model['sd_interval__'], model['floor_m']])
+                                vars=[model['groupmean'], model['sd_interval_'], model['floor_m']])
             step = pm.NUTS(model.vars, scaling=start)
-            pm.sample(50, step=step, start=start)
+            pm.sample(50, step, start)
 
 
 class TestARM12_6Uranium(SeededTest):
@@ -114,8 +117,8 @@ class TestARM12_6Uranium(SeededTest):
         with model:
             start = pm.Point({
                 'groupmean': self.obs_means.mean(),
-                'groupsd_interval__': 0,
-                'sd_interval__': 0,
+                'groupsd_interval_': 0,
+                'sd_interval_': 0,
                 'means': np.array(self.obs_means),
                 'u_m': np.array([.72]),
                 'floor_m': 0.,
@@ -126,7 +129,7 @@ class TestARM12_6Uranium(SeededTest):
             h = np.diag(H(start))
 
             step = pm.HamiltonianMC(model.vars, h)
-            pm.sample(50, step=step, start=start)
+            pm.sample(50, step, start)
 
 
 def build_disaster_model(masked=False):
@@ -157,7 +160,6 @@ def build_disaster_model(masked=False):
     return model
 
 
-@pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on float32")
 class TestDisasterModel(SeededTest):
     # Time series of recorded coal mining disasters in the UK from 1851 to 1962
     def test_disaster_model(self):
@@ -166,8 +168,8 @@ class TestDisasterModel(SeededTest):
             # Initial values for stochastic nodes
             start = {'early_mean': 2., 'late_mean': 3.}
             # Use slice sampler for means (other varibles auto-selected)
-            step = pm.Slice([model.early_mean_log__, model.late_mean_log__])
-            tr = pm.sample(500, tune=50, start=start, step=step, chains=2)
+            step = pm.Slice([model.early_mean_log_, model.late_mean_log_])
+            tr = pm.sample(500, tune=50, start=start, step=step)
             pm.summary(tr)
 
     def test_disaster_model_missing(self):
@@ -176,8 +178,8 @@ class TestDisasterModel(SeededTest):
             # Initial values for stochastic nodes
             start = {'early_mean': 2., 'late_mean': 3.}
             # Use slice sampler for means (other varibles auto-selected)
-            step = pm.Slice([model.early_mean_log__, model.late_mean_log__])
-            tr = pm.sample(500, tune=50, start=start, step=step, chains=2)
+            step = pm.Slice([model.early_mean_log_, model.late_mean_log_])
+            tr = pm.sample(500, tune=50, start=start, step=step)
             pm.summary(tr)
 
 
@@ -190,13 +192,62 @@ class TestGLMLinear(SeededTest):
         self.y = true_intercept + self.x * true_slope + np.random.normal(scale=.5, size=size)
         data = dict(x=self.x, y=self.y)
         with pm.Model() as model:
-            pm.GLM.from_formula('y ~ x', data)
+            pm.glm.glm('y ~ x', data)
         return model
 
     def test_run(self):
         with self.build_model():
-            start = pm.find_MAP(method="Powell")
-            pm.sample(50, pm.Slice(), start=start)
+            start = pm.find_MAP(fmin=opt.fmin_powell)
+            trace = pm.sample(50, pm.Slice(), start=start)
+
+        pm.glm.plot_posterior_predictive(trace)
+
+
+class TestHierarchical(SeededTest):
+    @classmethod
+    def setUpClass(cls):
+        n_groups = 10
+        no_pergroup = 30
+        n_group_predictors = 1
+        n_predictors = 3
+        n_observed = no_pergroup * n_groups
+
+        group = np.concatenate([[i] * no_pergroup for i in range(n_groups)])
+        group_predictors = np.random.normal(size=(n_groups, n_group_predictors))
+        predictors = np.random.normal(size=(n_observed, n_predictors))
+
+        group_effects_a = np.random.normal(size=(n_group_predictors, n_predictors))
+        effects_a = (np.random.normal(size=(n_groups, n_predictors)) +
+                     np.dot(group_predictors, group_effects_a))
+
+        y = np.sum(effects_a[group, :] * predictors, 1) + np.random.normal(size=(n_observed))
+        with pm.Model() as cls.model:
+            # m_g ~ N(0, .1)
+            group_effects = pm.Normal("group_effects", 0, .1,
+                                      shape=(1, n_group_predictors, n_predictors))
+            # sg ~ Uniform(.05, 10)
+            sg = pm.Uniform("sg", .05, 10, testval=2.)
+            # m ~ N(mg * pg, sg)
+            effects = pm.Normal("effects",
+                                (group_predictors[:, :, np.newaxis] * group_effects).sum(),
+                                sg ** -2,
+                                shape=(n_groups, n_predictors))
+            s = pm.Uniform("s", .01, 10, shape=n_groups)
+            g = tt.constant(group)
+            # y ~ Normal(m[g] * p, s)
+            pm.Normal('y', (effects[g] * predictors).sum(), s[g] ** -2, observed=y)
+
+    def test_normal(self):
+        with self.model:
+            start = pm.find_MAP()
+            step = pm.NUTS(self.model.vars, scaling=start)
+            pm.sample(50, step, start)
+
+    def test_sqlite(self):
+        with self.model:
+            start = pm.find_MAP()
+            step = pm.NUTS(self.model.vars, scaling=start)
+            pm.sample(50, step, start, trace='sqlite')
 
 
 class TestLatentOccupancy(SeededTest):
@@ -231,8 +282,7 @@ class TestLatentOccupancy(SeededTest):
     Created by Chris Fonnesbeck on 2008-07-28.
     Copyright (c) 2008 University of Otago. All rights reserved.
     """
-    def setup_method(self):
-        super(TestLatentOccupancy, self).setup_method()
+    def setUp(self):
         # Sample size
         n = 100
         # True mean count, given occupancy
@@ -240,14 +290,14 @@ class TestLatentOccupancy(SeededTest):
         # True occupancy
         pi = 0.4
         # Simulate some data data
-        self.y = ((np.random.random(n) < pi) * np.random.poisson(lam=theta, size=n)).astype('int16')
+        self.y = (np.random.random(n) < pi) * np.random.poisson(lam=theta, size=n)
 
     def build_model(self):
         with pm.Model() as model:
             # Estimated occupancy
             psi = pm.Beta('psi', 1, 1)
             # Latent variable for occupancy
-            pm.Bernoulli('z', psi, shape=self.y.shape)
+            pm.Bernoulli('z', psi, self.y.shape)
             # Estimated mean count
             theta = pm.Uniform('theta', 0, 100)
             # Poisson likelihood
@@ -257,17 +307,12 @@ class TestLatentOccupancy(SeededTest):
     def test_run(self):
         model = self.build_model()
         with model:
-            start = {
-                'psi': np.array(0.5, dtype='f'),
-                'z': (self.y > 0).astype('int16'),
-                'theta': np.array(5, dtype='f'),
-            }
-            step_one = pm.Metropolis([model.theta_interval__, model.psi_logodds__])
+            start = {'psi': 0.5, 'z': (self.y > 0).astype(int), 'theta': 5}
+            step_one = pm.Metropolis([model.theta_interval_, model.psi_logodds_])
             step_two = pm.BinaryMetropolis([model.z])
-            pm.sample(50, step=[step_one, step_two], start=start, chains=1)
+            pm.sample(50, [step_one, step_two], start)
 
 
-@pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on float32 due to starting inf at starting logP")
 class TestRSV(SeededTest):
     '''
     This model estimates the population prevalence of respiratory syncytial virus

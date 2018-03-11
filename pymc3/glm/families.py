@@ -5,7 +5,7 @@ import theano.tensor as tt
 from ..model import modelcontext
 from .. import distributions as pm_dists
 
-__all__ = ['Normal', 'StudentT', 'Binomial', 'Poisson', 'NegativeBinomial']
+__all__ = ['Normal', 'StudentT', 'Binomial', 'Poisson']
 
 # Define link functions
 
@@ -39,26 +39,24 @@ class Family(object):
             else:
                 setattr(self, key, val)
 
-    def _get_priors(self, model=None, name=''):
+    def _get_priors(self, model=None):
         """Return prior distributions of the likelihood.
 
         Returns
         -------
         dict : mapping name -> pymc3 distribution
         """
-        if name:
-            name = '{}_'.format(name)
         model = modelcontext(model)
         priors = {}
         for key, val in self.priors.items():
             if isinstance(val, numbers.Number):
                 priors[key] = val
             else:
-                priors[key] = model.Var('{}{}'.format(name, key), val)
+                priors[key] = model.Var(key, val)
 
         return priors
 
-    def create_likelihood(self, name, y_est, y_data, model=None):
+    def create_likelihood(self, y_est, y_data, model=None):
         """Create likelihood distribution of observed data.
 
         Parameters
@@ -68,12 +66,10 @@ class Family(object):
         y_data : array
             Observed dependent variable
         """
-        priors = self._get_priors(model=model, name=name)
+        priors = self._get_priors(model=model)
         # Wrap y_est in link function
         priors[self.parent] = self.link(y_est)
-        if name:
-            name = '{}_'.format(name)
-        return self.likelihood('{}y'.format(name), observed=y_data, **priors)
+        return self.likelihood('y', observed=y_data, **priors)
 
     def __repr__(self):
         return """Family {klass}:
@@ -101,6 +97,7 @@ class Binomial(Family):
     link = logit
     likelihood = pm_dists.Bernoulli
     parent = 'p'
+    priors = {'p': pm_dists.Beta.dist(alpha=1, beta=1)}
 
 
 class Poisson(Family):
@@ -108,11 +105,3 @@ class Poisson(Family):
     likelihood = pm_dists.Poisson
     parent = 'mu'
     priors = {'mu': pm_dists.HalfCauchy.dist(beta=10, testval=1.)}
-
-
-class NegativeBinomial(Family):
-    link = exp
-    likelihood = pm_dists.NegativeBinomial
-    parent = 'mu'
-    priors = {'mu': pm_dists.HalfCauchy.dist(beta=10, testval=1.),
-              'alpha': pm_dists.HalfCauchy.dist(beta=10, testval=1.)}

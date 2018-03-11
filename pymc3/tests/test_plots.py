@@ -1,20 +1,17 @@
 import matplotlib
-matplotlib.use('Agg', warn=False)  # noqa
+matplotlib.use('Agg', warn=False)
 
 import numpy as np
 import pymc3 as pm
 from .checks import close_to
 
-from .models import multidimensional_model, simple_categorical
-from ..plots import traceplot, forestplot, autocorrplot, plot_posterior, energyplot, densityplot
-from ..plots.utils import make_2d
+from .models import multidimensional_model
+from ..plots import traceplot, forestplot, autocorrplot, plot_posterior, make_2d
 from ..step_methods import Slice, Metropolis
 from ..sampling import sample
 from ..tuning.scaling import find_hessian
 from .test_examples import build_disaster_model
 from pymc3.examples import arbitrary_stochastic as asmod
-import theano
-import pytest
 
 
 def test_plots():
@@ -23,58 +20,34 @@ def test_plots():
         start = model.test_point
         h = find_hessian(start)
         step = Metropolis(model.vars, h)
-        trace = sample(3000, tune=0, step=step, start=start, chains=1)
+        trace = sample(3000, step, start)
 
-    traceplot(trace)
-    forestplot(trace)
-    plot_posterior(trace)
-    autocorrplot(trace)
-    energyplot(trace)
-    densityplot(trace) 
-
-def test_energyplot():
-    with asmod.build_model():
-        trace = sample(cores=1)
-
-    energyplot(trace)
-    energyplot(trace, shade=0.5, alpha=0)
-    energyplot(trace, kind='hist')
-
-
-def test_plots_categorical():
-    # Test single trace
-    start, model, _ = simple_categorical()
-    with asmod.build_model() as model:
-        start = model.test_point
-        h = find_hessian(start)
-        step = Metropolis(model.vars, h)
-        trace = sample(3000, tune=0, step=step, start=start, chains=1)
-
-    traceplot(trace)
+        traceplot(trace)
+        forestplot(trace)
+        plot_posterior(trace)
+        autocorrplot(trace)
 
 
 def test_plots_multidimensional():
-    # Test multiple trace
+    # Test single trace
     start, model, _ = multidimensional_model()
-    with model:
+    with model as model:
         h = np.diag(find_hessian(start))
         step = Metropolis(model.vars, h)
-        trace = sample(3000, tune=0, step=step, start=start)
-    
-    traceplot(trace)
-    plot_posterior(trace)
-    forestplot(trace)
-    densityplot(trace)
+        trace = sample(3000, step, start)
 
-@pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on GPU due to cores=2")
+        traceplot(trace)
+        plot_posterior(trace)
+
+
 def test_multichain_plots():
     model = build_disaster_model()
     with model:
         # Run sampler
-        step1 = Slice([model.early_mean_log__, model.late_mean_log__])
+        step1 = Slice([model.early_mean_log_, model.late_mean_log_])
         step2 = Metropolis([model.switchpoint])
         start = {'early_mean': 2., 'late_mean': 3., 'switchpoint': 50}
-        ptrace = sample(1000, tune=0, step=[step1, step2], start=start, cores=2)
+        ptrace = sample(1000, [step1, step2], start, njobs=2)
 
     forestplot(ptrace, varnames=['early_mean', 'late_mean'])
     autocorrplot(ptrace, varnames=['switchpoint'])
@@ -95,26 +68,14 @@ def test_make_2d():
 
 
 def test_plots_transformed():
-    with pm.Model():
+    with pm.Model() as model:
         pm.Uniform('x', 0, 1)
         step = pm.Metropolis()
-        trace = pm.sample(100, tune=0, step=step, chains=1)
+        trace = pm.sample(100, step=step)
 
     assert traceplot(trace).shape == (1, 2)
     assert traceplot(trace, plot_transformed=True).shape == (2, 2)
     assert autocorrplot(trace).shape == (1, 1)
     assert autocorrplot(trace, plot_transformed=True).shape == (2, 1)
-    assert plot_posterior(trace).numCols == 1
-    assert plot_posterior(trace, plot_transformed=True).shape == (2, )
-
-    with pm.Model():
-        pm.Uniform('x', 0, 1)
-        step = pm.Metropolis()
-        trace = pm.sample(100, tune=0, step=step, chains=2)
-
-    assert traceplot(trace).shape == (1, 2)
-    assert traceplot(trace, plot_transformed=True).shape == (2, 2)
-    assert autocorrplot(trace).shape == (1, 2)
-    assert autocorrplot(trace, plot_transformed=True).shape == (2, 2)
-    assert plot_posterior(trace).numCols == 1
+    assert plot_posterior(trace).shape == (1, )
     assert plot_posterior(trace, plot_transformed=True).shape == (2, )

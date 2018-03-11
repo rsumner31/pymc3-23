@@ -1,21 +1,5 @@
-import pymc3 as pm
 from pymc3.tests import backend_fixtures as bf
 from pymc3.backends import ndarray, text
-import pytest
-import theano
-
-
-class TestTextSampling(object):
-    name = 'text-db'
-
-    def test_supports_sampler_stats(self):
-        with pm.Model():
-            pm.Normal("mu", mu=0, sd=1, shape=2)
-            db = text.Text(self.name)
-            pm.sample(20, tune=10, init=None, trace=db, cores=2)
-
-    def teardown_method(self):
-        bf.remove_file_or_directory(self.name)
 
 
 class TestText0dSampling(bf.SamplingTestCase):
@@ -36,7 +20,6 @@ class TestText2dSampling(bf.SamplingTestCase):
     shape = (2, 3)
 
 
-@pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on float32")
 class TestText0dSelection(bf.SelectionTestCase):
     backend = text.Text
     name = 'text-db'
@@ -62,7 +45,6 @@ class TestTextDumpLoad(bf.DumpLoadTestCase):
     shape = (2, 3)
 
 
-@pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on float32")
 class TestTextDumpFunction(bf.BackendEqualityTestCase):
     backend0 = backend1 = ndarray.NDArray
     name0 = None
@@ -70,8 +52,8 @@ class TestTextDumpFunction(bf.BackendEqualityTestCase):
     shape = (2, 3)
 
     @classmethod
-    def setup_class(cls):
-        super(TestTextDumpFunction, cls).setup_class()
+    def setUpClass(cls):
+        super(TestTextDumpFunction, cls).setUpClass()
         text.dump(cls.name1, cls.mtrace1)
         with cls.model:
             cls.mtrace1 = text.load(cls.name1)

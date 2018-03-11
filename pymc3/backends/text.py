@@ -16,12 +16,12 @@ represents two variables, x and y, where x is a scalar and y has a
 shape of (3, 2).
 """
 from glob import glob
+import numpy as np
 import os
 import pandas as pd
 
 from ..backends import base, ndarray
 from . import tracetab as ttab
-from ..theanof import floatX
 
 
 class Text(base.BaseTrace):
@@ -36,14 +36,12 @@ class Text(base.BaseTrace):
     vars : list of variables
         Sampling values will be stored for these variables. If None,
         `model.unobserved_RVs` is used.
-    test_point : dict
-        use different test point that might be with changed variables shapes
     """
 
-    def __init__(self, name, model=None, vars=None, test_point=None):
+    def __init__(self, name, model=None, vars=None):
         if not os.path.exists(name):
             os.mkdir(name)
-        super(Text, self).__init__(name, model, vars, test_point)
+        super(Text, self).__init__(name, model, vars)
 
         self.flat_names = {v: ttab.create_flat_names(v, shape)
                            for v, shape in self.var_shapes.items()}
@@ -64,9 +62,6 @@ class Text(base.BaseTrace):
         chain : int
             Chain number
         """
-        if self._fh is not None:
-            self._fh.close()
-
         self.chain = chain
         self.filename = os.path.join(self.name, 'chain-{}.csv'.format(chain))
 
@@ -107,10 +102,6 @@ class Text(base.BaseTrace):
     def _load_df(self):
         if self.df is None:
             self.df = pd.read_csv(self.filename)
-            for key, dtype in self.df.dtypes.iteritems():
-                if "float" in str(dtype):
-                    self.df[key] = floatX(self.df[key])
-
 
     def __len__(self):
         if self.filename is None:
@@ -150,7 +141,7 @@ class Text(base.BaseTrace):
         self._load_df()
         pt = {}
         for varname in self.varnames:
-            vals = self.df[self.flat_names[varname]].iloc[idx].values
+            vals = self.df[self.flat_names[varname]].iloc[idx]
             pt[varname] = vals.reshape(self.var_shapes[varname])
         return pt
 
@@ -170,9 +161,6 @@ def load(name, model=None):
     A MultiTrace instance
     """
     files = glob(os.path.join(name, 'chain-*.csv'))
-
-    if len(files) == 0:
-        raise ValueError('No files present in directory {}'.format(name))
 
     straces = []
     for f in files:
@@ -201,8 +189,12 @@ def dump(name, trace, chains=None):
     if chains is None:
         chains = trace.chains
 
+    var_shapes = trace._straces[chains[0]].var_shapes
+    flat_names = {v: ttab.create_flat_names(v, shape)
+                  for v, shape in var_shapes.items()}
+
     for chain in chains:
         filename = os.path.join(name, 'chain-{}.csv'.format(chain))
         df = ttab.trace_to_dataframe(
-            trace, chains=chain, include_transformed=True)
+            trace, chains=chain, flat_names=flat_names)
         df.to_csv(filename, index=False)

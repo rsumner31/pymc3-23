@@ -11,7 +11,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-import pymc3 as pm
+import pymc3
 import theano.tensor as tt
 
 np.random.seed(42)
@@ -24,23 +24,20 @@ xdata = np.random.normal(xdata, 10)
 ydata = np.random.normal(ydata, 10)
 data = {'x': xdata, 'y': ydata}
 
-# define loglikelihood outside of the model context, otherwise cores wont work:
-# Lambdas defined in local namespace are not picklable (see issue #1995)
-def loglike1(value):
-    return -1.5 * tt.log(1 + value**2)
-def loglike2(value):
-    return -tt.log(tt.abs_(value))
-
-with pm.Model() as model:
-    alpha = pm.Normal('intercept', mu=0, sd=100)
+with pymc3.Model() as model:
+    alpha = pymc3.Uniform('intercept', -100, 100)
     # Create custom densities
-    beta = pm.DensityDist('slope', loglike1, testval=0)
-    sigma = pm.DensityDist('sigma', loglike2, testval=1)
+    beta = pymc3.DensityDist('slope', lambda value: -
+                             1.5 * tt.log(1 + value**2), testval=0)
+    sigma = pymc3.DensityDist(
+        'sigma', lambda value: -tt.log(tt.abs_(value)), testval=1)
     # Create likelihood
-    like = pm.Normal('y_est', mu=alpha + beta *
+    like = pymc3.Normal('y_est', mu=alpha + beta *
                         xdata, sd=sigma, observed=ydata)
 
-    trace = pm.sample(2000, cores=2)
+    start = pymc3.find_MAP()
+    step = pymc3.NUTS(scaling=start)  # Instantiate sampler
+    trace = pymc3.sample(10000, step, start=start)
 
 
 #################################################
@@ -51,6 +48,7 @@ def compute_sigma_level(trace1, trace2, nbins=20):
     """From a set of traces, bin by number of standard deviations"""
     L, xbins, ybins = np.histogram2d(trace1, trace2, nbins)
     L[L == 0] = 1E-16
+    logL = np.log(L)
 
     shape = L.shape
     L = L.ravel()
@@ -97,7 +95,7 @@ def plot_MCMC_model(ax, xdata, ydata, trace):
 
 def plot_MCMC_results(xdata, ydata, trace, colors='k'):
     """Plot both the trace and the model together"""
-    _, ax = plt.subplots(1, 2, figsize=(10, 4))
+    fig, ax = plt.subplots(1, 2, figsize=(10, 4))
     plot_MCMC_trace(ax[0], xdata, ydata, trace, True, colors=colors)
     plot_MCMC_model(ax[1], xdata, ydata, trace)
 

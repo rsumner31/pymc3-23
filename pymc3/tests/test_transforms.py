@@ -2,15 +2,12 @@ import pymc3.distributions.transforms as tr
 import numpy as np
 import theano
 import theano.tensor as tt
-from .test_distributions import Simplex, Rplusbig, Rminusbig, Unit, R, Vector, MultiSimplex, Circ
+from .test_distributions import Simplex, Rplusbig, Rminusbig, Unit, R, Vector, MultiSimplex
 
-from .checks import close_to, close_to_logical
+from .checks import close_to
 from ..theanof import jacobian
 
-
-# some transforms (stick breaking) require additon of small slack in order to be numerically
-# stable. The minimal addable slack for float32 is higher thus we need to be less strict
-tol = 1e-7 if theano.config.floatX == 'flaot64' else 1e-6
+tol = 1e-7
 
 
 def check_transform_identity(transform, domain, constructor=tt.dscalar, test=0):
@@ -46,8 +43,8 @@ def test_simplex_bounds():
                       tt.dvector, np.array([0, 0]))
 
     close_to(vals.sum(axis=1), 1, tol)
-    close_to_logical(vals > 0, True, tol)
-    close_to_logical(vals < 1, True, tol)
+    close_to(vals > 0, True, tol)
+    close_to(vals < 1, True, tol)
 
 
 def test_simplex_jacobian_det():
@@ -101,17 +98,7 @@ def test_log():
                        tt.dvector, [0, 0], elemwise=True)
 
     vals = get_values(tr.log)
-    close_to_logical(vals > 0, True, tol)
-
-
-def test_log_exp_m1():
-    check_transform_identity(tr.log_exp_m1, Rplusbig)
-    check_jacobian_det(tr.log_exp_m1, Rplusbig, elemwise=True)
-    check_jacobian_det(tr.log_exp_m1, Vector(Rplusbig, 2),
-                       tt.dvector, [0, 0], elemwise=True)
-
-    vals = get_values(tr.log_exp_m1)
-    close_to_logical(vals > 0, True, tol)
+    close_to(vals > 0, True, tol)
 
 
 def test_logodds():
@@ -121,8 +108,8 @@ def test_logodds():
                        tt.dvector, [.5, .5], elemwise=True)
 
     vals = get_values(tr.logodds)
-    close_to_logical(vals > 0, True, tol)
-    close_to_logical(vals < 1, True, tol)
+    close_to(vals > 0, True, tol)
+    close_to(vals < 1, True, tol)
 
 
 def test_lowerbound():
@@ -133,7 +120,7 @@ def test_lowerbound():
                        tt.dvector, [0, 0], elemwise=True)
 
     vals = get_values(trans)
-    close_to_logical(vals > 0, True, tol)
+    close_to(vals > 0, True, tol)
 
 
 def test_upperbound():
@@ -144,7 +131,7 @@ def test_upperbound():
                        tt.dvector, [-1, -1], elemwise=True)
 
     vals = get_values(trans)
-    close_to_logical(vals < 0, True, tol)
+    close_to(vals < 0, True, tol)
 
 
 def test_interval():
@@ -155,17 +142,5 @@ def test_interval():
         check_jacobian_det(trans, domain, elemwise=True)
 
         vals = get_values(trans)
-        close_to_logical(vals > a, True, tol)
-        close_to_logical(vals < b, True, tol)
-
-
-def test_circular():
-    trans = tr.circular
-    check_transform_identity(trans, Circ)
-    check_jacobian_det(trans, Circ)
-
-    vals = get_values(trans)
-    close_to_logical(vals > -np.pi, True, tol)
-    close_to_logical(vals < np.pi, True, tol)
-
-    assert isinstance(trans.forward(1), tt.TensorConstant)
+        close_to(vals > a, True, tol)
+        close_to(vals < b, True, tol)

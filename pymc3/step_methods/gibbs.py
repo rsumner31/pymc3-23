@@ -7,7 +7,6 @@ from .arraystep import ArrayStep, Competence
 from ..distributions.discrete import Categorical
 from numpy import array, max, exp, cumsum, nested_iters, empty, searchsorted, ones, arange
 from numpy.random import uniform
-from warnings import warn
 
 from theano.gof.graph import inputs
 from theano.tensor import add
@@ -26,8 +25,6 @@ class ElemwiseCategorical(ArrayStep):
     # variables)
 
     def __init__(self, vars, values=None, model=None):
-        warn('ElemwiseCategorical is deprecated, switch to CategoricalGibbsMetropolis.',
-             DeprecationWarning, stacklevel = 2)
         model = modelcontext(model)
         self.var = vars[0]
         self.sh = ones(self.var.dshape, self.var.dtype)
@@ -44,9 +41,14 @@ class ElemwiseCategorical(ArrayStep):
         return categorical(p, self.var.dshape)
 
     @staticmethod
-    def competence(var, has_grad):
+    def competence(var):
+        distribution = getattr(
+            var.distribution, 'parent_dist', var.distribution)
         if isinstance(var.distribution, Categorical):
-            return Competence.COMPATIBLE
+            if var.distribution.k > 2:
+                return Competence.IDEAL
+            else:
+                return Competence.COMPATIBLE
         return Competence.INCOMPATIBLE
 
 
@@ -64,7 +66,7 @@ def categorical(prob, shape):
                             op_flags=[['readonly'], ['readwrite']],
                             flags=['reduce_ok'])
 
-    for _ in it0:
+    for i in it0:
         p, o = it1.itviews
         p = cumsum(exp(p - max(p, axis=0)))
         r = uniform() * p[-1]

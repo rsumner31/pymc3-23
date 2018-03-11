@@ -4,7 +4,7 @@ from ..model import Model
 from ..distributions import DiscreteUniform, Continuous
 
 import numpy as np
-import pytest
+from nose.tools import raises
 
 
 class DistTest(Continuous):
@@ -18,13 +18,15 @@ class DistTest(Continuous):
         return 0
 
 
+@raises(AttributeError)
 def test_default_nan_fail():
-    with Model(), pytest.raises(AttributeError):
+    with Model():
         DistTest('x', np.nan, 2, defaults=['a'])
 
 
+@raises(AttributeError)
 def test_default_empty_fail():
-    with Model(), pytest.raises(AttributeError):
+    with Model():
         DistTest('x', 1, 2, defaults=[])
 
 
@@ -63,9 +65,3 @@ def test_default_discrete_uniform():
     with Model():
         x = DiscreteUniform('x', lower=1, upper=2)
         assert x.init_value == 1
-
-def test_discrete_uniform_negative():
-    model = Model()
-    with model:
-        x = DiscreteUniform('x', lower=-10, upper=0)
-    assert model.test_point['x'] == -5

@@ -70,12 +70,10 @@ class SQLite(base.BaseTrace):
     vars : list of variables
         Sampling values will be stored for these variables. If None,
         `model.unobserved_RVs` is used.
-    test_point : dict
-        use different test point that might be with changed variables shapes
     """
 
-    def __init__(self, name, model=None, vars=None, test_point=None):
-        super(SQLite, self).__init__(name, model, vars, test_point)
+    def __init__(self, name, model=None, vars=None):
+        super(SQLite, self).__init__(name, model, vars)
         self._var_cols = {}
         self.var_inserts = {}  # varname -> insert statement
         self.draw_idx = 0
@@ -112,7 +110,7 @@ class SQLite(base.BaseTrace):
                               for varname, shape in self.var_shapes.items()}
             self._create_table()
             self._is_setup = True
-        self._create_insert_queries()
+        self._create_insert_queries(chain)
 
     def _create_table(self):
         template = TEMPLATES['table']
@@ -127,7 +125,7 @@ class SQLite(base.BaseTrace):
                                             value_cols=colnames)
                 self.db.cursor.execute(statement)
 
-    def _create_insert_queries(self):
+    def _create_insert_queries(self, chain):
         template = TEMPLATES['insert']
         for varname, var_cols in self._var_cols.items():
             # Create insert statement for each variable.
@@ -150,7 +148,7 @@ class SQLite(base.BaseTrace):
             values = (self.draw_idx, self.chain) + tuple(np.ravel(value))
             self._queue[varname].append(values)
 
-        if len(self._queue[self.varnames[0]]) > self._queue_limit:
+        if len(self._queue[varname]) > self._queue_limit:
             self._execute_queue()
         self.draw_idx += 1
 
@@ -180,21 +178,13 @@ class SQLite(base.BaseTrace):
         self.db.connect()
         statement = TEMPLATES['draw_count'].format(table=self.varnames[0])
         self.db.cursor.execute(statement, (self.chain,))
-        counts = self.db.cursor.fetchall()[0][0]
-        if counts is None:
-            return 0
-        else:
-            return counts
+        return self.db.cursor.fetchall()[0][0]
 
     def _get_max_draw(self, chain):
         self.db.connect()
         statement = TEMPLATES['max_draw'].format(table=self.varnames[0])
         self.db.cursor.execute(statement, (chain, ))
-        counts = self.db.cursor.fetchall()[0][0]
-        if counts is None:
-            return 0
-        else:
-            return counts
+        return self.db.cursor.fetchall()[0][0]
 
     def get_values(self, varname, burn=0, thin=1):
         """Get values from trace.
@@ -209,13 +199,9 @@ class SQLite(base.BaseTrace):
         -------
         A NumPy array
         """
-        if burn is None:
-            burn = 0
-        if thin is None:
-            thin = 1
-
         if burn < 0:
-            burn = max(0, len(self) + burn)
+            raise ValueError('Negative burn values not supported '
+                             'in SQLite backend.')
         if thin < 1:
             raise ValueError('Only positive thin values are supported '
                              'in SQLite backend.')
@@ -253,7 +239,7 @@ class SQLite(base.BaseTrace):
         """
         idx = int(idx)
         if idx < 0:
-            idx = self._get_max_draw(self.chain) + idx + 1
+            idx = self._get_max_draw(self.chain) - idx - 1
         statement = TEMPLATES['select_point']
         self.db.connect()
         var_values = {}
@@ -307,17 +293,13 @@ def load(name, model=None):
     db = _SQLiteDB(name)
     db.connect()
     varnames = _get_table_list(db.cursor)
-    if len(varnames) == 0:
-        raise ValueError(('Can not get variable list for database'
-                          '`{}`'.format(name)))
     chains = _get_chain_list(db.cursor, varnames[0])
 
     straces = []
     for chain in chains:
         strace = SQLite(name, model=model)
+        strace.varnames = varnames
         strace.chain = chain
-        strace._var_cols = {varname: ttab.create_flat_names('v', shape)
-                            for varname, shape in strace.var_shapes.items()}
         strace._is_setup = True
         strace.db = db  # Share the db with all traces.
         straces.append(strace)

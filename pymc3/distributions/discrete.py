@@ -1,20 +1,17 @@
 from functools import partial
+
 import numpy as np
 import theano
 import theano.tensor as tt
 from scipy import stats
-import warnings
 
-from pymc3.util import get_variable_name
 from .dist_math import bound, factln, binomln, betaln, logpow
-from .distribution import Discrete, draw_values, generate_samples, reshape_sampled
-from pymc3.math import tround
-from ..math import logaddexp, logit, log1pexp
+from .distribution import Discrete, draw_values, generate_samples
 
-__all__ = ['Binomial',  'BetaBinomial',  'Bernoulli',  'DiscreteWeibull',
-           'Poisson', 'NegativeBinomial', 'ConstantDist', 'Constant',
-           'ZeroInflatedPoisson', 'ZeroInflatedBinomial', 'ZeroInflatedNegativeBinomial',
-           'DiscreteUniform', 'Geometric', 'Categorical']
+__all__ = ['Binomial',  'BetaBinomial',  'Bernoulli',  'Poisson',
+           'NegativeBinomial', 'ConstantDist', 'ZeroInflatedPoisson',
+           'ZeroInflatedNegativeBinomial', 'DiscreteUniform', 'Geometric',
+           'Categorical']
 
 
 class Binomial(Discrete):
@@ -43,11 +40,11 @@ class Binomial(Discrete):
 
     def __init__(self, n, p, *args, **kwargs):
         super(Binomial, self).__init__(*args, **kwargs)
-        self.n = n = tt.as_tensor_variable(n)
-        self.p = p = tt.as_tensor_variable(p)
-        self.mode = tt.cast(tround(n * p), self.dtype)
+        self.n = n
+        self.p = p
+        self.mode = tt.cast(tt.round(n * p), self.dtype)
 
-    def random(self, point=None, size=None):
+    def random(self, point=None, size=None, repeat=None):
         n, p = draw_values([self.n, self.p], point=point)
         return generate_samples(stats.binom.rvs, n=n, p=p,
                                 dist_shape=self.shape,
@@ -62,15 +59,6 @@ class Binomial(Discrete):
             0 <= value, value <= n,
             0 <= p, p <= 1)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        n = dist.n
-        p = dist.p
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Binomial}}(\mathit{{n}}={},~\mathit{{p}}={})$'.format(name,
-                                                get_variable_name(n),
-                                                get_variable_name(p))
 
 class BetaBinomial(Discrete):
     R"""
@@ -103,10 +91,10 @@ class BetaBinomial(Discrete):
 
     def __init__(self, alpha, beta, n, *args, **kwargs):
         super(BetaBinomial, self).__init__(*args, **kwargs)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.beta = beta = tt.as_tensor_variable(beta)
-        self.n = n = tt.as_tensor_variable(n)
-        self.mode = tt.cast(tround(alpha / (alpha + beta)), 'int8')
+        self.alpha = alpha
+        self.beta = beta
+        self.n = n
+        self.mode = tt.cast(tt.round(alpha / (alpha + beta)), 'int8')
 
     def _random(self, alpha, beta, n, size=None):
         size = size or 1
@@ -120,7 +108,7 @@ class BetaBinomial(Discrete):
         samples = np.reshape(stats.binom.rvs(n=_n, p=_p, size=_size), size)
         return samples
 
-    def random(self, point=None, size=None):
+    def random(self, point=None, size=None, repeat=None):
         alpha, beta, n = \
             draw_values([self.alpha, self.beta, self.n], point=point)
         return generate_samples(self._random, alpha=alpha, beta=beta, n=n,
@@ -135,16 +123,6 @@ class BetaBinomial(Discrete):
                      - betaln(alpha, beta),
                      value >= 0, value <= self.n,
                      alpha > 0, beta > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        alpha = dist.alpha
-        beta = dist.beta
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{NegativeBinomial}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
-                                                get_variable_name(alpha),
-                                                get_variable_name(beta))
 
 
 class Bernoulli(Discrete):
@@ -165,114 +143,25 @@ class Bernoulli(Discrete):
     ----------
     p : float
         Probability of success (0 < p < 1).
-    logit_p : float
-        Logit of success probability. Only one of `p` and `logit_p`
-        can be specified.
     """
 
-    def __init__(self, p=None, logit_p=None, *args, **kwargs):
+    def __init__(self, p, *args, **kwargs):
         super(Bernoulli, self).__init__(*args, **kwargs)
-        if sum(int(var is None) for var in [p, logit_p]) != 1:
-            raise ValueError('Specify one of p and logit_p')
-        if p is not None:
-            self._is_logit = False
-            self.p = p = tt.as_tensor_variable(p)
-            self._logit_p = logit(p)
-        else:
-            self._is_logit = True
-            self.p = tt.nnet.sigmoid(logit_p)
-            self._logit_p = tt.as_tensor_variable(logit_p)
+        self.p = p
+        self.mode = tt.cast(tt.round(p), 'int8')
 
-        self.mode = tt.cast(tround(self.p), 'int8')
-
-    def random(self, point=None, size=None):
-        p = draw_values([self.p], point=point)[0]
+    def random(self, point=None, size=None, repeat=None):
+        p = draw_values([self.p], point=point)
         return generate_samples(stats.bernoulli.rvs, p,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
-        if self._is_logit:
-            lp = tt.switch(value, self._logit_p, -self._logit_p)
-            return -log1pexp(-lp)
-        else:
-            p = self.p
-            return bound(
-                tt.switch(value, tt.log(p), tt.log(1 - p)),
-                value >= 0, value <= 1,
-                p >= 0, p <= 1)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        p = dist.p
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Bernoulli}}(\mathit{{p}}={})$'.format(name,
-                                                get_variable_name(p))
-
-
-class DiscreteWeibull(Discrete):
-    R"""Discrete Weibull log-likelihood
-
-    The discrete Weibull distribution is a flexible model of count data that
-    can handle both over- and under-dispersion.
-
-    .. math:: f(x \mid q, \beta) = q^{x^{\beta}} - q^{(x + 1)^{\beta}}
-
-    ========  ======================
-    Support   :math:`x \in \mathbb{N}_0`
-    Mean      :math:`\mu = \sum_{x = 1}^{\infty} q^{x^{\beta}}`
-    Variance  :math:`2 \sum_{x = 1}^{\infty} x q^{x^{\beta}} - \mu - \mu^2`
-    ========  ======================
-    """
-    def __init__(self, q, beta, *args, **kwargs):
-        super(DiscreteWeibull, self).__init__(*args, defaults=['median'], **kwargs)
-
-        self.q = q = tt.as_tensor_variable(q)
-        self.beta = beta = tt.as_tensor_variable(beta)
-
-        self.median = self._ppf(0.5)
-
-    def logp(self, value):
-        q = self.q
-        beta = self.beta
-
-        return bound(tt.log(tt.power(q, tt.power(value, beta)) - tt.power(q, tt.power(value + 1, beta))),
-                     0 <= value,
-                     0 < q, q < 1,
-                     0 < beta)
-
-    def _ppf(self, p):
-        """
-        The percentile point function (the inverse of the cumulative
-        distribution function) of the discrete Weibull distribution.
-        """
-        q = self.q
-        beta = self.beta
-
-        return (tt.ceil(tt.power(tt.log(1 - p) / tt.log(q), 1. / beta)) - 1).astype('int64')
-
-    def _random(self, q, beta, size=None):
-        p = np.random.uniform(size=size)
-
-        return np.ceil(np.power(np.log(1 - p) / np.log(q), 1. / beta)) - 1
-
-    def random(self, point=None, size=None):
-        q, beta = draw_values([self.q, self.beta], point=point)
-
-        return generate_samples(self._random, q, beta,
-                                dist_shape=self.shape,
-                                size=size)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        q = dist.q
-        beta = dist.beta
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{DiscreteWeibull}}(\mathit{{q}}={},~\mathit{{beta}}={})$'.format(name,
-                                                get_variable_name(q),
-                                                get_variable_name(beta))
+        p = self.p
+        return bound(
+            tt.switch(value, tt.log(p), tt.log(1 - p)),
+            value >= 0, value <= 1,
+            p >= 0, p <= 1)
 
 
 class Poisson(Discrete):
@@ -304,11 +193,11 @@ class Poisson(Discrete):
 
     def __init__(self, mu, *args, **kwargs):
         super(Poisson, self).__init__(*args, **kwargs)
-        self.mu = mu = tt.as_tensor_variable(mu)
+        self.mu = mu
         self.mode = tt.floor(mu).astype('int32')
 
-    def random(self, point=None, size=None):
-        mu = draw_values([self.mu], point=point)[0]
+    def random(self, point=None, size=None, repeat=None):
+        mu = draw_values([self.mu], point=point)
         return generate_samples(stats.poisson.rvs, mu,
                                 dist_shape=self.shape,
                                 size=size)
@@ -319,16 +208,8 @@ class Poisson(Discrete):
             logpow(mu, value) - factln(value) - mu,
             mu >= 0, value >= 0)
         # Return zero when mu and value are both zero
-        return tt.switch(tt.eq(mu, 0) * tt.eq(value, 0),
+        return tt.switch(1 * tt.eq(mu, 0) * tt.eq(value, 0),
                          0, log_prob)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        mu = dist.mu
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Poisson}}(\mathit{{mu}}={})$'.format(name,
-                                                get_variable_name(mu))
 
 
 class NegativeBinomial(Discrete):
@@ -359,17 +240,17 @@ class NegativeBinomial(Discrete):
 
     def __init__(self, mu, alpha, *args, **kwargs):
         super(NegativeBinomial, self).__init__(*args, **kwargs)
-        self.mu = mu = tt.as_tensor_variable(mu)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
+        self.mu = mu
+        self.alpha = alpha
         self.mode = tt.floor(mu).astype('int32')
 
-    def random(self, point=None, size=None):
+    def random(self, point=None, size=None, repeat=None):
         mu, alpha = draw_values([self.mu, self.alpha], point=point)
         g = generate_samples(stats.gamma.rvs, alpha, scale=mu / alpha,
                              dist_shape=self.shape,
                              size=size)
         g[g == 0] = np.finfo(float).eps  # Just in case
-        return reshape_sampled(stats.poisson.rvs(g), size, self.shape)
+        return stats.poisson.rvs(g)
 
     def logp(self, value):
         mu = self.mu
@@ -380,19 +261,9 @@ class NegativeBinomial(Discrete):
                          value >= 0, mu > 0, alpha > 0)
 
         # Return Poisson when alpha gets very large.
-        return tt.switch(tt.gt(alpha, 1e10),
+        return tt.switch(1 * (alpha > 1e10),
                          Poisson.dist(self.mu).logp(value),
                          negbinom)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        mu = dist.mu
-        alpha = dist.alpha
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{NegativeBinomial}}(\mathit{{mu}}={},~\mathit{{alpha}}={})$'.format(name,
-                                                get_variable_name(mu),
-                                                get_variable_name(alpha))
 
 
 class Geometric(Discrete):
@@ -418,11 +289,11 @@ class Geometric(Discrete):
 
     def __init__(self, p, *args, **kwargs):
         super(Geometric, self).__init__(*args, **kwargs)
-        self.p = p = tt.as_tensor_variable(p)
+        self.p = p
         self.mode = 1
 
-    def random(self, point=None, size=None):
-        p = draw_values([self.p], point=point)[0]
+    def random(self, point=None, size=None, repeat=None):
+        p = draw_values([self.p], point=point)
         return generate_samples(np.random.geometric, p,
                                 dist_shape=self.shape,
                                 size=size)
@@ -431,14 +302,6 @@ class Geometric(Discrete):
         p = self.p
         return bound(tt.log(p) + logpow(1 - p, value - 1),
                      0 <= p, p <= 1, value >= 1)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        p = dist.p
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Geometric}}(\mathit{{p}}={})$'.format(name,
-                                                get_variable_name(p))
 
 
 class DiscreteUniform(Discrete):
@@ -466,15 +329,16 @@ class DiscreteUniform(Discrete):
         self.lower = tt.floor(lower).astype('int32')
         self.upper = tt.floor(upper).astype('int32')
         self.mode = tt.maximum(
-            tt.floor((upper + lower) / 2.).astype('int32'), self.lower)
+            tt.floor((upper - lower) / 2.).astype('int32'), self.lower)
 
     def _random(self, lower, upper, size=None):
         # This way seems to be the only to deal with lower and upper
         # as array-like.
-        samples = stats.randint.rvs(lower, upper + 1, size=size)
-        return samples
+        samples = stats.uniform.rvs(lower, upper - lower - np.finfo(float).eps,
+                                    size=size)
+        return np.floor(samples).astype('int32')
 
-    def random(self, point=None, size=None):
+    def random(self, point=None, size=None, repeat=None):
         lower, upper = draw_values([self.lower, self.upper], point=point)
         return generate_samples(self._random,
                                 lower, upper,
@@ -487,16 +351,6 @@ class DiscreteUniform(Discrete):
         return bound(-tt.log(upper - lower + 1),
                      lower <= value, value <= upper)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        lower = dist.lower
-        upper = dist.upper
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{DiscreteUniform}}(\mathit{{lower}}={},~\mathit{{upper}}={})$'.format(name,
-                                                get_variable_name(lower),
-                                                get_variable_name(upper))
-
 
 class Categorical(Discrete):
     R"""
@@ -507,7 +361,7 @@ class Categorical(Discrete):
     .. math:: f(x \mid p) = p_x
 
     ========  ===================================
-    Support   :math:`x \in \{0, 1, \ldots, |p|-1\}`
+    Support   :math:`x \in \{1, 2, \ldots, |p|\}`
     ========  ===================================
 
     Parameters
@@ -523,7 +377,7 @@ class Categorical(Discrete):
             self.k = tt.shape(p)[-1].tag.test_value
         except AttributeError:
             self.k = tt.shape(p)[-1]
-        self.p = p = tt.as_tensor_variable(p)
+        self.p = tt.as_tensor_variable(p)
         self.p = (p.T / tt.sum(p, -1)).T
         self.mode = tt.argmax(p)
 
@@ -548,29 +402,18 @@ class Categorical(Discrete):
         p = self.p
         k = self.k
 
-        # Clip values before using them for indexing
-        value_clip = tt.clip(value, 0, k - 1)
-
         sumto1 = theano.gradient.zero_grad(
             tt.le(abs(tt.sum(p, axis=-1) - 1), 1e-5))
-
         if p.ndim > 1:
-            a = tt.log(p[tt.arange(p.shape[0]), value_clip])
+            a = tt.log(p[tt.arange(p.shape[0]), value])
         else:
-            a = tt.log(p[value_clip])
-
-        return bound(a, value >= 0, value <= (k - 1), sumto1)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        p = dist.p
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Categorical}}(\mathit{{p}}={})$'.format(name,
-                                                get_variable_name(p))
+            a = tt.log(p[value])
+        return bound(a,
+                     value >= 0, value <= (k - 1),
+                     sumto1)
 
 
-class Constant(Discrete):
+class ConstantDist(Discrete):
     """
     Constant log-likelihood.
 
@@ -581,13 +424,11 @@ class Constant(Discrete):
     """
 
     def __init__(self, c, *args, **kwargs):
-        warnings.warn("Constant has been deprecated. We recommend using a Determinstic object instead.",
-                    DeprecationWarning)
-        super(Constant, self).__init__(*args, **kwargs)
-        self.mean = self.median = self.mode = self.c = c = tt.as_tensor_variable(c)
+        super(ConstantDist, self).__init__(*args, **kwargs)
+        self.mean = self.median = self.mode = self.c = c
 
-    def random(self, point=None, size=None):
-        c = draw_values([self.c], point=point)[0]
+    def random(self, point=None, size=None, repeat=None):
+        c = draw_values([self.c], point=point)
         dtype = np.array(c).dtype
 
         def _random(c, dtype=dtype, size=None):
@@ -600,15 +441,6 @@ class Constant(Discrete):
         c = self.c
         return bound(0, tt.eq(value, c))
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Constant}}()$'.format(name)
-
-
-ConstantDist = Constant
-
 
 class ZeroInflatedPoisson(Discrete):
     R"""
@@ -617,9 +449,9 @@ class ZeroInflatedPoisson(Discrete):
     Often used to model the number of events occurring in a fixed period
     of time when the times at which events occur are independent.
 
-    .. math::
+    .. math:: 
 
-        f(x \mid \psi, \theta) = \left\{ \begin{array}{l}
+        f(x \mid \theta, \psi) = \left\{ \begin{array}{l}
             (1-\psi) + \psi e^{-\theta}, \text{if } x = 0 \\
             \psi \frac{e^{-\theta}\theta^x}{x!}, \text{if } x=1,2,3,\ldots
             \end{array} \right.
@@ -632,129 +464,32 @@ class ZeroInflatedPoisson(Discrete):
 
     Parameters
     ----------
-    psi : float
-        Expected proportion of Poisson variates (0 < psi < 1)
     theta : float
         Expected number of occurrences during the given interval
         (theta >= 0).
+    psi : float
+        Expected proportion of Poisson variates (0 < psi < 1)
+
     """
 
-    def __init__(self, psi, theta, *args, **kwargs):
+    def __init__(self, theta, psi, *args, **kwargs):
         super(ZeroInflatedPoisson, self).__init__(*args, **kwargs)
-        self.theta = theta = tt.as_tensor_variable(theta)
-        self.psi = psi = tt.as_tensor_variable(psi)
+        self.theta = theta
+        self.psi = psi
         self.pois = Poisson.dist(theta)
         self.mode = self.pois.mode
 
-    def random(self, point=None, size=None):
+    def random(self, point=None, size=None, repeat=None):
         theta, psi = draw_values([self.theta, self.psi], point=point)
         g = generate_samples(stats.poisson.rvs, theta,
                              dist_shape=self.shape,
                              size=size)
-        sampled = g * (np.random.random(np.squeeze(g.shape)) < psi)
-        return reshape_sampled(sampled, size, self.shape)
+        return g * (np.random.random(np.squeeze(g.shape)) < psi)
 
     def logp(self, value):
-        psi = self.psi
-        theta = self.theta
-
-        logp_val = tt.switch(
-            tt.gt(value, 0),
-            tt.log(psi) + self.pois.logp(value),
-            logaddexp(tt.log1p(-psi), tt.log(psi) - theta))
-
-        return bound(
-            logp_val,
-            0 <= value,
-            0 <= psi, psi <= 1,
-            0 <= theta)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        theta = dist.theta
-        psi = dist.psi
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{ZeroInflatedPoisson}}(\mathit{{theta}}={},~\mathit{{psi}}={})$'.format(name,
-                                                get_variable_name(theta),
-                                                get_variable_name(psi))
-
-
-class ZeroInflatedBinomial(Discrete):
-    R"""
-    Zero-inflated Binomial log-likelihood.
-
-    .. math::
-
-        f(x \mid \psi, n, p) = \left\{ \begin{array}{l}
-            (1-\psi) + \psi (1-p)^{n}, \text{if } x = 0 \\
-            \psi {n \choose x} p^x (1-p)^{n-x}, \text{if } x=1,2,3,\ldots,n
-            \end{array} \right.
-
-    ========  ==========================
-    Support   :math:`x \in \mathbb{N}_0`
-    Mean      :math:`(1 - \psi) n p`
-    Variance  :math:`(1-\psi) n p [1 - p(1 - \psi n)].`
-    ========  ==========================
-
-    Parameters
-    ----------
-    psi : float
-        Expected proportion of Binomial variates (0 < psi < 1)
-    n : int
-        Number of Bernoulli trials (n >= 0).
-    p : float
-        Probability of success in each trial (0 < p < 1).
-
-    """
-
-    def __init__(self, psi, n, p, *args, **kwargs):
-        super(ZeroInflatedBinomial, self).__init__(*args, **kwargs)
-        self.n = n = tt.as_tensor_variable(n)
-        self.p = p = tt.as_tensor_variable(p)
-        self.psi = psi = tt.as_tensor_variable(psi)
-        self.bin = Binomial.dist(n, p)
-        self.mode = self.bin.mode
-
-    def random(self, point=None, size=None):
-        n, p, psi = draw_values([self.n, self.p, self.psi], point=point)
-        g = generate_samples(stats.binom.rvs, n, p,
-                             dist_shape=self.shape,
-                             size=size)
-        sampled = g * (np.random.random(np.squeeze(g.shape)) < psi)
-        return reshape_sampled(sampled, size, self.shape)
-
-    def logp(self, value):
-        psi = self.psi
-        p = self.p
-        n = self.n
-
-        logp_val = tt.switch(
-            tt.gt(value, 0),
-            tt.log(psi) + self.bin.logp(value),
-            logaddexp(tt.log1p(-psi), tt.log(psi) + n * tt.log1p(-p)))
-
-        return bound(
-            logp_val,
-            0 <= value, value <= n,
-            0 <= psi, psi <= 1,
-            0 <= p, p <= 1)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        n = dist.n
-        p = dist.p
-        psi = dist.psi
-
-        name_n = get_variable_name(n)
-        name_p = get_variable_name(p)
-        name_psi = get_variable_name(psi)
-        name = r'\text{%s}' % name
-        return (r'${} \sim \text{{ZeroInflatedBinomial}}'
-                r'(\mathit{{n}}={},~\mathit{{p}}={},~'
-                r'\mathit{{psi}}={})$'
-                .format(name, name_n, name_p, name_psi))
+        return tt.switch(value > 0,
+                         tt.log(self.psi) + self.pois.logp(value),
+                         tt.log((1. - self.psi) + self.psi * tt.exp(-self.theta)))
 
 
 class ZeroInflatedNegativeBinomial(Discrete):
@@ -763,22 +498,14 @@ class ZeroInflatedNegativeBinomial(Discrete):
 
     The Zero-inflated version of the Negative Binomial (NB).
     The NB distribution describes a Poisson random variable
-    whose rate parameter is gamma distributed.
+    whose rate parameter is gamma distributed. 
 
     .. math::
 
-       f(x \mid \psi, \mu, \alpha) = \left\{
-         \begin{array}{l}
-           (1-\psi) + \psi \left (
-             \frac{\alpha}{\alpha+\mu}
-           \right) ^\alpha, \text{if } x = 0 \\
-           \psi \frac{\Gamma(x+\alpha)}{x! \Gamma(\alpha)} \left (
-             \frac{\alpha}{\mu+\alpha}
-           \right)^\alpha \left(
-             \frac{\mu}{\mu+\alpha}
-           \right)^x, \text{if } x=1,2,3,\ldots
-         \end{array}
-       \right.
+       f(x \mid \mu, \alpha, \psi) = \left\{ \begin{array}{l}
+            (1-\psi) + \psi \left (\frac{\alpha}{\alpha+\mu} \right) ^\alpha, \text{if } x = 0 \\
+            \psi \frac{\Gamma(x+\alpha)}{x! \Gamma(\alpha)} \left (\frac{\alpha}{\mu+\alpha} \right)^\alpha \left( \frac{\mu}{\mu+\alpha} \right)^x, \text{if } x=1,2,3,\ldots
+            \end{array} \right.
 
     ========  ==========================
     Support   :math:`x \in \mathbb{N}_0`
@@ -788,66 +515,32 @@ class ZeroInflatedNegativeBinomial(Discrete):
 
     Parameters
     ----------
-    psi : float
-        Expected proportion of NegativeBinomial variates (0 < psi < 1)
     mu : float
         Poission distribution parameter (mu > 0).
     alpha : float
         Gamma distribution parameter (alpha > 0).
-
+    psi : float
+        Expected proportion of NegativeBinomial variates (0 < psi < 1)
     """
 
-    def __init__(self, psi, mu, alpha, *args, **kwargs):
+    def __init__(self, mu, alpha, psi, *args, **kwargs):
         super(ZeroInflatedNegativeBinomial, self).__init__(*args, **kwargs)
-        self.mu = mu = tt.as_tensor_variable(mu)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.psi = psi = tt.as_tensor_variable(psi)
+        self.mu = mu
+        self.alpha = alpha
+        self.psi = psi
         self.nb = NegativeBinomial.dist(mu, alpha)
         self.mode = self.nb.mode
 
-    def random(self, point=None, size=None):
+    def random(self, point=None, size=None, repeat=None):
         mu, alpha, psi = draw_values(
             [self.mu, self.alpha, self.psi], point=point)
         g = generate_samples(stats.gamma.rvs, alpha, scale=mu / alpha,
                              dist_shape=self.shape,
                              size=size)
         g[g == 0] = np.finfo(float).eps  # Just in case
-        sampled = stats.poisson.rvs(g) * (np.random.random(np.squeeze(g.shape)) < psi)
-        return reshape_sampled(sampled, size, self.shape)
+        return stats.poisson.rvs(g) * (np.random.random(np.squeeze(g.shape)) < psi)
 
     def logp(self, value):
-        alpha = self.alpha
-        mu = self.mu
-        psi = self.psi
-
-        logp_other = tt.log(psi) + self.nb.logp(value)
-        logp_0 = logaddexp(
-            tt.log1p(-psi),
-            tt.log(psi) + alpha * (tt.log(alpha) - tt.log(alpha + mu)))
-
-        logp_val = tt.switch(
-            tt.gt(value, 0),
-            logp_other,
-            logp_0)
-
-        return bound(
-            logp_val,
-            0 <= value,
-            0 <= psi, psi <= 1,
-            mu > 0, alpha > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        mu = dist.mu
-        alpha = dist.alpha
-        psi = dist.psi
-
-        name_mu = get_variable_name(mu)
-        name_alpha = get_variable_name(alpha)
-        name_psi = get_variable_name(psi)
-        name = r'\text{%s}' % name
-        return (r'${} \sim \text{{ZeroInflatedNegativeBinomial}}'
-                r'(\mathit{{mu}}={},~\mathit{{alpha}}={},~'
-                r'\mathit{{psi}}={})$'
-                .format(name, name_mu, name_alpha, name_psi))
+        return tt.switch(value > 0,
+                         tt.log(self.psi) + self.nb.logp(value),
+                         tt.log((1. - self.psi) + self.psi * (self.alpha / (self.alpha + self.mu))**self.alpha))

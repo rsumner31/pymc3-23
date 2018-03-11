@@ -67,6 +67,8 @@ def fixed_hessian(point, vars=None, model=None):
     point = Point(point, model=model)
 
     bij = DictToArrayBijection(ArrayOrdering(vars), point)
+    dlogp = bij.mapf(model.fastdlogp(vars))
+
     rval = np.ones(bij.map(point).size) / 10
     return rval
 
@@ -103,28 +105,28 @@ def find_hessian_diag(point, vars=None, model=None):
     return H(Point(point, model=model))
 
 
-def guess_scaling(point, vars=None, model=None, scaling_bound=1e-8):
+def guess_scaling(point, vars=None, model=None):
     model = modelcontext(model)
     try:
         h = find_hessian_diag(point, vars, model=model)
     except NotImplementedError:
         h = fixed_hessian(point, vars, model=model)
-    return adjust_scaling(h, scaling_bound)
+    return adjust_scaling(h)
 
 
-def adjust_scaling(s, scaling_bound):
+def adjust_scaling(s):
     if s.ndim < 2:
-        return adjust_precision(s, scaling_bound)
+        return adjust_precision(s)
     else:
         val, vec = np.linalg.eigh(s)
-        val = adjust_precision(val, scaling_bound)
+        val = adjust_precision(val)
         return eig_recompose(val, vec)
 
 
-def adjust_precision(tau, scaling_bound=1e-8):
+def adjust_precision(tau):
     mag = sqrt(abs(tau))
 
-    bounded = bound(log(mag), log(scaling_bound), log(1./scaling_bound))
+    bounded = bound(log(mag), log(1e-10), log(1e10))
     return exp(bounded)**2
 
 
@@ -136,7 +138,7 @@ def eig_recompose(val, vec):
     return vec.dot(np.diag(val)).dot(vec.T)
 
 
-def trace_cov(trace, vars=None, model=None):
+def trace_cov(trace, vars=None):
     """
     Calculate the flattened covariance matrix using a sample trace
 
@@ -153,12 +155,9 @@ def trace_cov(trace, vars=None, model=None):
     r : array (n,n)
         covariance matrix
     """
-    model = modelcontext(model)
 
-    if model is not None:
-        vars = model.free_RVs
-    elif vars is None:
-        vars = trace.varnames
+    if vars is None:
+        vars = trace.samples.keys
 
     def flat_t(var):
         x = trace[str(var)]

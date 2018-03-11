@@ -10,21 +10,17 @@ from __future__ import division
 import numpy as np
 import theano.tensor as tt
 from scipy import stats
-from scipy.interpolate import InterpolatedUnivariateSpline
 import warnings
 
-from pymc3.theanof import floatX
 from . import transforms
-from pymc3.util import get_variable_name
-from .special import log_i0
-from .dist_math import bound, logpow, gammaln, betaln, std_cdf, alltrue_elemwise, SplineWrapper
+from .dist_math import bound, logpow, gammaln, betaln, std_cdf, i0, i1
 from .distribution import Continuous, draw_values, generate_samples
 
-__all__ = ['Uniform', 'Flat', 'HalfFlat', 'Normal', 'Beta', 'Exponential',
-           'Laplace', 'StudentT', 'Cauchy', 'HalfCauchy', 'Gamma', 'Weibull',
-           'HalfStudentT', 'Lognormal', 'ChiSquared', 'HalfNormal', 'Wald',
-           'Pareto', 'InverseGamma', 'ExGaussian', 'VonMises', 'SkewNormal',
-           'Logistic', 'Interpolated']
+__all__ = ['Uniform', 'Flat', 'Normal', 'Beta', 'Exponential', 'Laplace',
+           'StudentT', 'Cauchy', 'HalfCauchy', 'Gamma', 'Weibull',
+           'Bound', 'HalfStudentT', 'StudentTpos', 'Lognormal', 'ChiSquared',
+           'HalfNormal', 'Wald', 'Pareto', 'InverseGamma', 'ExGaussian',
+           'VonMises', 'SkewNormal']
 
 
 class PositiveContinuous(Continuous):
@@ -42,32 +38,10 @@ class UnitContinuous(Continuous):
         super(UnitContinuous, self).__init__(
             transform=transform, *args, **kwargs)
 
-def assert_negative_support(var, label, distname, value=-1e-6):
-    # Checks for evidence of positive support for a variable
-    if var is None:
-        return
-    try:
-        # Transformed distribution
-        support = np.isfinite(var.transformed.distribution.dist
-                                .logp(value).tag.test_value)
-    except AttributeError:
-        try:
-            # Untransformed distribution
-            support = np.isfinite(var.distribution.logp(value).tag.test_value)
-        except AttributeError:
-            # Otherwise no direct evidence of non-positive support
-            support = False
-
-    if np.any(support):
-        msg = "The variable specified for {0} has negative support for {1}, ".format(label, distname)
-        msg += "likely making it unsuitable for this parameter."
-        warnings.warn(msg)
-
 
 def get_tau_sd(tau=None, sd=None):
     """
-    Find precision and standard deviation. The link between the two 
-    parameterizations is given by the inverse relationship:
+    Find precision and standard deviation
 
     .. math::
         \tau = \frac{1}{\sigma^2}
@@ -103,7 +77,7 @@ def get_tau_sd(tau=None, sd=None):
     tau = 1. * tau
     sd = 1. * sd
 
-    return (floatX(tau), floatX(sd))
+    return (tau, sd)
 
 
 class Uniform(Continuous):
@@ -113,24 +87,6 @@ class Uniform(Continuous):
     .. math::
 
        f(x \mid lower, upper) = \frac{1}{upper-lower}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        x = np.linspace(-3.0, 3.0, 1000)
-        a, b = 0.0, 2.0
-        y = np.zeros(1000)
-        y[(x<b) & (x>a)] = 1.0/(b-a)
-        fig, ax = plt.subplots()
-        ax.plot(x, y, label='lower=1, upper=2')
-        a, b = -2.0, 1.0
-        y = np.zeros(1000)
-        y[(x<b) & (x>a)] = 1.0/(b-a)
-        ax.plot(x, y, label='lower=-2, upper=1')
-        ax.legend(loc='upper right')
-        ax.set(ylim=[-0.2,1.2], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  =====================================
     Support   :math:`x \in [lower, upper]`
@@ -148,14 +104,15 @@ class Uniform(Continuous):
 
     def __init__(self, lower=0, upper=1, transform='interval',
                  *args, **kwargs):
-        if transform == 'interval':
-            transform = transforms.interval(lower, upper)
-        super(Uniform, self).__init__(transform=transform, *args, **kwargs)
+        super(Uniform, self).__init__(*args, **kwargs)
 
-        self.lower = lower = floatX(tt.as_tensor_variable(lower))
-        self.upper = upper = floatX(tt.as_tensor_variable(upper))
+        self.lower = lower
+        self.upper = upper
         self.mean = (upper + lower) / 2.
         self.median = self.mean
+
+        if transform == 'interval':
+            self.transform = transforms.interval(lower, upper)
 
     def random(self, point=None, size=None, repeat=None):
         lower, upper = draw_values([self.lower, self.upper],
@@ -171,15 +128,6 @@ class Uniform(Continuous):
         return bound(-tt.log(upper - lower),
                      value >= lower, value <= upper)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        lower = dist.lower
-        upper = dist.upper
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Uniform}}(\mathit{{lower}}={},~\mathit{{upper}}={})$'.format(
-            name, get_variable_name(lower), get_variable_name(upper))
-
 
 class Flat(Continuous):
     """
@@ -188,36 +136,14 @@ class Flat(Continuous):
     """
 
     def __init__(self, *args, **kwargs):
-        self._default = 0
-        super(Flat, self).__init__(defaults=('_default',), *args, **kwargs)
+        super(Flat, self).__init__(*args, **kwargs)
+        self.median = 0
 
     def random(self, point=None, size=None, repeat=None):
         raise ValueError('Cannot sample from Flat distribution')
 
     def logp(self, value):
         return tt.zeros_like(value)
-
-    def _repr_latex_(self, name=None, dist=None):
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Flat}}()$'.format(name)
-
-
-class HalfFlat(PositiveContinuous):
-    """Improper flat prior over the positive reals."""
-
-    def __init__(self, *args, **kwargs):
-        self._default = 1
-        super(HalfFlat, self).__init__(defaults=('_default',), *args, **kwargs)
-
-    def random(self, point=None, size=None, repeat=None):
-        raise ValueError('Cannot sample from HalfFlat distribution')
-
-    def logp(self, value):
-        return bound(tt.zeros_like(value), value > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{HalfFlat}}()$'.format(name)
 
 
 class Normal(Continuous):
@@ -244,80 +170,57 @@ class Normal(Continuous):
 
        \tau = \dfrac{1}{\sigma^2}
 
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-5.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, sd : st.norm.pdf(x, loc=mu, scale=sd)
-        plot_pdf = lambda a, b : ax.plot(x, f(a,b), label=r'$\mu$={0}, $\sigma$={1}'.format(a,b))
-        plot_pdf(0.0, 0.4)
-        plot_pdf(0.0, 1.0)
-        plot_pdf(0.0, 2.0)
-        plot_pdf(-2.0, 0.4)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-5,5], ylim=[0,1.2], xlabel='x', ylabel='f(x)')
-        plt.show()
-
     Parameters
     ----------
     mu : float
         Mean.
     sd : float
-        Standard deviation (sd > 0) (only required if tau is not specified).
+        Standard deviation (sd > 0).
     tau : float
-        Precision (tau > 0) (only required if sd is not specified).
-        
-    Examples
-    --------
-    .. code-block:: python
-
-        with pm.Model():
-            x = pm.Normal('x', mu=0, sd=10)
-            
-        with pm.Model():
-            x = pm.Normal('x', mu=0, tau=1/23)
+        Precision (tau > 0).
     """
 
-    def __init__(self, mu=0, sd=None, tau=None, **kwargs):
-        tau, sd = get_tau_sd(tau=tau, sd=sd)
-        self.sd = tt.as_tensor_variable(sd)
-        self.tau = tt.as_tensor_variable(tau)
+    def __init__(self, *args, **kwargs):
+        # FIXME In order to catch the case where Normal('x', 0, .1) is
+        # called to display a warning we have to fetch the args and
+        # kwargs manually.  After a certain period we should revert
+        # back to the old calling signature.
 
-        self.mean = self.median = self.mode = self.mu = mu = tt.as_tensor_variable(mu)
+        if len(args) == 1:
+            mu = args[0]
+            sd = kwargs.pop('sd', None)
+            tau = kwargs.pop('tau', None)
+        elif len(args) == 2:
+            warnings.warn(('The order of positional arguments to Normal()'
+                           'has changed. The new signature is:'
+                           'Normal(name, mu, sd) instead of Normal(name, mu, tau).'),
+                          DeprecationWarning)
+            mu, sd = args
+            tau = kwargs.pop('tau', None)
+        else:
+            mu = kwargs.pop('mu', 0.)
+            sd = kwargs.pop('sd', None)
+            tau = kwargs.pop('tau', None)
+
+        self.mean = self.median = self.mode = self.mu = mu
+        self.tau, self.sd = get_tau_sd(tau=tau, sd=sd)
         self.variance = 1. / self.tau
-
-        assert_negative_support(sd, 'sd', 'Normal')
-        assert_negative_support(tau, 'tau', 'Normal')
 
         super(Normal, self).__init__(**kwargs)
 
     def random(self, point=None, size=None, repeat=None):
-        mu, tau, _ = draw_values([self.mu, self.tau, self.sd],
-                                 point=point)
+        mu, tau, sd = draw_values([self.mu, self.tau, self.sd],
+                                  point=point)
         return generate_samples(stats.norm.rvs, loc=mu, scale=tau**-0.5,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
-        sd = self.sd
         tau = self.tau
+        sd = self.sd
         mu = self.mu
-
         return bound((-tau * (value - mu)**2 + tt.log(tau / np.pi / 2.)) / 2.,
-                     sd > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        sd = dist.sd
-        mu = dist.mu
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Normal}}(\mathit{{mu}}={},~\mathit{{sd}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(sd))
+                     tau > 0, sd > 0)
 
 
 class HalfNormal(PositiveContinuous):
@@ -330,22 +233,6 @@ class HalfNormal(PositiveContinuous):
            \sqrt{\frac{2\tau}{\pi}}
            \exp\left\{ {\frac{-x^2 \tau}{2}}\right\}
 
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda b : st.halfnorm.pdf(x, scale=1.0/np.sqrt(b))
-        plot_pdf = lambda b : ax.plot(x, f(b), label=r'$\tau$={0}'.format(b))
-        plot_pdf(0.5)
-        plot_pdf(1.0)
-        plot_pdf(2.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,5], ylim=[0,1.2], xlabel='x', ylabel='f(x)')
-        plt.show()
-
     ========  ==========================================
     Support   :math:`x \in [0, \infty)`
     Mean      :math:`0`
@@ -355,36 +242,19 @@ class HalfNormal(PositiveContinuous):
     Parameters
     ----------
     sd : float
-        Standard deviation (sd > 0) (only required if tau is not specified).
+        Standard deviation (sd > 0).
     tau : float
-        Precision (tau > 0) (only required if sd is not specified).
-        
-    Examples
-    --------
-    .. code-block:: python
-
-        with pm.Model():
-            x = pm.HalfNormal('x', sd=10)
-        
-        with pm.Model():
-            x = pm.HalfNormal('x', tau=1/15)
+        Precision (tau > 0).
     """
 
     def __init__(self, sd=None, tau=None, *args, **kwargs):
         super(HalfNormal, self).__init__(*args, **kwargs)
-        tau, sd = get_tau_sd(tau=tau, sd=sd)
-
-        self.sd = sd = tt.as_tensor_variable(sd)
-        self.tau = tau = tt.as_tensor_variable(tau)
-
+        self.tau, self.sd = get_tau_sd(tau=tau, sd=sd)
         self.mean = tt.sqrt(2 / (np.pi * self.tau))
         self.variance = (1. - 2 / np.pi) / self.tau
 
-        assert_negative_support(tau, 'tau', 'HalfNormal')
-        assert_negative_support(sd, 'sd', 'HalfNormal')
-
     def random(self, point=None, size=None, repeat=None):
-        sd = draw_values([self.sd], point=point)[0]
+        sd = draw_values([self.sd], point=point)
         return generate_samples(stats.halfnorm.rvs, loc=0., scale=sd,
                                 dist_shape=self.shape,
                                 size=size)
@@ -395,14 +265,6 @@ class HalfNormal(PositiveContinuous):
         return bound(-0.5 * tau * value**2 + 0.5 * tt.log(tau * 2. / np.pi),
                      value >= 0,
                      tau > 0, sd > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        sd = dist.sd
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{HalfNormal}}(\mathit{{sd}}={})$'.format(name,
-                                                                get_variable_name(sd))
 
 
 class Wald(PositiveContinuous):
@@ -416,24 +278,6 @@ class Wald(PositiveContinuous):
            \exp\left\{
                -\frac{\lambda}{2x}\left(\frac{x-\mu}{\mu}\right)^2
            \right\}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 3.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, lam : st.invgauss.pdf(x, mu/lam, scale=lam)
-        plot_pdf = lambda a, b : ax.plot(x, f(a,b), label=r'$\mu$={0}, $\lambda$={1}'.format(a,b))
-        plot_pdf(1.0,1.0)
-        plot_pdf(1.0,0.2)
-        plot_pdf(1.0,3.0)
-        plot_pdf(3,1)
-        plot_pdf(3,0.2)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,3], ylim=[0,3.0], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  =============================
     Support   :math:`x \in (0, \infty)`
@@ -481,20 +325,12 @@ class Wald(PositiveContinuous):
 
     def __init__(self, mu=None, lam=None, phi=None, alpha=0., *args, **kwargs):
         super(Wald, self).__init__(*args, **kwargs)
-        mu, lam, phi = self.get_mu_lam_phi(mu, lam, phi)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.mu = mu = tt.as_tensor_variable(mu)
-        self.lam = lam = tt.as_tensor_variable(lam)
-        self.phi = phi = tt.as_tensor_variable(phi)
-
-        self.mean = self.mu + self.alpha
+        self.mu, self.lam, self.phi = self.get_mu_lam_phi(mu, lam, phi)
+        self.alpha = alpha
+        self.mean = self.mu + alpha
         self.mode = self.mu * (tt.sqrt(1. + (1.5 * self.mu / self.lam)**2)
-                               - 1.5 * self.mu / self.lam) + self.alpha
+                               - 1.5 * self.mu / self.lam) + alpha
         self.variance = (self.mu**3) / self.lam
-
-        assert_negative_support(phi, 'phi', 'Wald')
-        assert_negative_support(mu, 'mu', 'Wald')
-        assert_negative_support(lam, 'lam', 'Wald')
 
     def get_mu_lam_phi(self, mu, lam, phi):
         if mu is None:
@@ -543,18 +379,6 @@ class Wald(PositiveContinuous):
                      value > 0, value - alpha > 0,
                      mu > 0, lam > 0, alpha >= 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        lam = dist.lam
-        mu = dist.mu
-        alpha = dist.alpha
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Wald}}(\mathit{{mu}}={},~\mathit{{lam}}={},~\mathit{{alpha}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(lam),
-                                                                get_variable_name(alpha))
-
 
 class Beta(UnitContinuous):
     R"""
@@ -564,24 +388,6 @@ class Beta(UnitContinuous):
 
        f(x \mid \alpha, \beta) =
            \frac{x^{\alpha - 1} (1 - x)^{\beta - 1}}{B(\alpha, \beta)}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 1.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda a, b : st.beta.pdf(x, a, b)
-        plot_pdf = lambda a, b : ax.plot(x, f(a,b), label=r'$\alpha$={0}, $\beta$={1}'.format(a,b))
-        plot_pdf(0.5, 0.5)
-        plot_pdf(5.0, 1.0)
-        plot_pdf(1.0, 3.0)
-        plot_pdf(2.0, 2.0)
-        plot_pdf(2.0, 5.0)
-        plt.legend(loc='upper center', frameon=False)
-        ax.set(xlim=[0,1], ylim=[0,2.5], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ==============================================================
     Support   :math:`x \in (0, 1)`
@@ -609,7 +415,7 @@ class Beta(UnitContinuous):
     mu : float
         Alternative mean (0 < mu < 1).
     sd : float
-        Alternative standard deviation (0 < sd < sqrt(mu * (1 - mu))).
+        Alternative standard deviation (sd > 0).
 
     Notes
     -----
@@ -622,15 +428,11 @@ class Beta(UnitContinuous):
         super(Beta, self).__init__(*args, **kwargs)
 
         alpha, beta = self.get_alpha_beta(alpha, beta, mu, sd)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.beta = beta = tt.as_tensor_variable(beta)
-
-        self.mean = self.alpha / (self.alpha + self.beta)
-        self.variance = self.alpha * self.beta / (
-            (self.alpha + self.beta)**2 * (self.alpha + self.beta + 1))
-
-        assert_negative_support(alpha, 'alpha', 'Beta')
-        assert_negative_support(beta, 'beta', 'Beta')
+        self.alpha = alpha
+        self.beta = beta
+        self.mean = alpha / (alpha + beta)
+        self.variance = alpha * beta / (
+            (alpha + beta)**2 * (alpha + beta + 1))
 
     def get_alpha_beta(self, alpha=None, beta=None, mu=None, sd=None):
         if (alpha is not None) and (beta is not None):
@@ -656,25 +458,10 @@ class Beta(UnitContinuous):
         alpha = self.alpha
         beta = self.beta
 
-        logval = tt.log(value)
-        log1pval = tt.log1p(-value)
-        logp = (tt.switch(tt.eq(alpha, 1), 0, (alpha - 1) * logval)
-                + tt.switch(tt.eq(beta, 1), 0, (beta - 1) * log1pval)
-                - betaln(alpha, beta))
-
-        return bound(logp,
+        return bound(logpow(value, alpha - 1) + logpow(1 - value, beta - 1)
+                     - betaln(alpha, beta),
                      value >= 0, value <= 1,
                      alpha > 0, beta > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        alpha = dist.alpha
-        beta = dist.beta
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Beta}}(\mathit{{alpha}}={},~\mathit{{alpha}}={})$'.format(name,
-                                                                get_variable_name(alpha),
-                                                                get_variable_name(beta))
 
 
 class Exponential(PositiveContinuous):
@@ -684,22 +471,6 @@ class Exponential(PositiveContinuous):
     .. math::
 
        f(x \mid \lambda) = \lambda \exp\left\{ -\lambda x \right\}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda lam : st.expon.pdf(x, scale=1.0/lam)
-        plot_pdf = lambda lam : ax.plot(x, f(lam), label=r'$\lambda$={0}'.format(lam))
-        plot_pdf(0.5)
-        plot_pdf(1.0)
-        plot_pdf(1.5)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,5], ylim=[0,1.6], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ============================
     Support   :math:`x \in [0, \infty)`
@@ -715,17 +486,15 @@ class Exponential(PositiveContinuous):
 
     def __init__(self, lam, *args, **kwargs):
         super(Exponential, self).__init__(*args, **kwargs)
-        self.lam = lam = tt.as_tensor_variable(lam)
-        self.mean = 1. / self.lam
+        self.lam = lam
+        self.mean = 1. / lam
         self.median = self.mean * tt.log(2)
-        self.mode = tt.zeros_like(self.lam)
+        self.mode = 0
 
-        self.variance = self.lam**-2
-
-        assert_negative_support(lam, 'lam', 'Exponential')
+        self.variance = lam**-2
 
     def random(self, point=None, size=None, repeat=None):
-        lam = draw_values([self.lam], point=point)[0]
+        lam = draw_values([self.lam], point=point)
         return generate_samples(np.random.exponential, scale=1. / lam,
                                 dist_shape=self.shape,
                                 size=size)
@@ -734,13 +503,6 @@ class Exponential(PositiveContinuous):
         lam = self.lam
         return bound(tt.log(lam) - lam * value, value > 0, lam > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        lam = dist.lam
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Exponential}}(\mathit{{lam}}={})$'.format(name,
-                                                                get_variable_name(lam))
 
 class Laplace(Continuous):
     R"""
@@ -748,25 +510,8 @@ class Laplace(Continuous):
 
     .. math::
 
-       f(x \mid \mu, b) =
+       f(x \mid \alpha, \beta) =
            \frac{1}{2b} \exp \left\{ - \frac{|x - \mu|}{b} \right\}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-10.0, 10.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, b : st.laplace.pdf(x, loc=mu, scale=b)
-        plot_pdf = lambda mu, b : ax.plot(x, f(mu, b), label=r'$\mu$={0}, $b$={1}'.format(mu, b))
-        plot_pdf(0.0, 1.0)
-        plot_pdf(0.0, 2.0)
-        plot_pdf(0.0, 4)
-        plot_pdf(-5.0, 4)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-10,10], ylim=[0,0.5], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ========================
     Support   :math:`x \in \mathbb{R}`
@@ -784,12 +529,10 @@ class Laplace(Continuous):
 
     def __init__(self, mu, b, *args, **kwargs):
         super(Laplace, self).__init__(*args, **kwargs)
-        self.b = b = tt.as_tensor_variable(b)
-        self.mean = self.median = self.mode = self.mu = mu = tt.as_tensor_variable(mu)
+        self.b = b
+        self.mean = self.median = self.mode = self.mu = mu
 
-        self.variance = 2 * self.b**2
-
-        assert_negative_support(b, 'b', 'Laplace')
+        self.variance = 2 * b**2
 
     def random(self, point=None, size=None, repeat=None):
         mu, b = draw_values([self.mu, self.b], point=point)
@@ -802,16 +545,6 @@ class Laplace(Continuous):
         b = self.b
 
         return -tt.log(2 * b) - abs(value - mu) / b
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        b = dist.b
-        mu = dist.mu
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Laplace}}(\mathit{{mu}}={},~\mathit{{b}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(b))
 
 
 class Lognormal(PositiveContinuous):
@@ -826,67 +559,33 @@ class Lognormal(PositiveContinuous):
     .. math::
 
        f(x \mid \mu, \tau) =
-           \frac{1}{x} \sqrt{\frac{\tau}{2\pi}}
-           \exp\left\{ -\frac{\tau}{2} (\ln(x)-\mu)^2 \right\}
+           \sqrt{\frac{\tau}{2\pi}}
+           \frac{\exp\left\{ -\frac{\tau}{2} (\ln(x)-\mu)^2 \right\}}{x}
 
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 3.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, sd : st.lognorm.pdf(x, sd, scale=np.exp(mu))
-        plot_pdf = lambda mu, sd : ax.plot(x, f(mu, sd), label=r'$\mu$={0}, $\sigma$={1}'.format(mu, sd))
-        plot_pdf(0.0, 0.25)
-        plot_pdf(0.0, 0.5)
-        plot_pdf(0.0, 1.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,3], ylim=[0,1.8], xlabel='x', ylabel='f(x)')
-        plt.show()
-
-    ========  =========================================================================
-    Support   :math:`x \in [0, \infty)`
+    ========  ================================================================
+    Support   :math:`x \in (0, 1)`
     Mean      :math:`\exp\{\mu + \frac{1}{2\tau}\}`
-    Variance  :math:`(\exp\{\frac{1}{\tau}\} - 1) \times \exp\{2\mu + \frac{1}{\tau}\}`
-    ========  =========================================================================
+    Variance  :math:`\exp\{\frac{1}{\tau} - 1\} \exp\{2\mu + \frac{1}{\tau}\}`
+    ========  ================================================================
 
     Parameters
     ----------
     mu : float
         Location parameter.
-    sd : float
-        Standard deviation. (sd > 0). (only required if tau is not specified).
     tau : float
-        Scale parameter (tau > 0). (only required if sd is not specified).
-        
-    Example
-    -------
-    .. code-block:: python
-
-        # Example to show that we pass in only `sd` or `tau` but not both.
-        with pm.Model():
-            x = pm.Lognormal('x', mu=2, sd=30)
-
-        with pm.Model():
-            x = pm.Lognormal('x', mu=2, tau=1/100)
+        Scale parameter (tau > 0).
     """
 
     def __init__(self, mu=0, sd=None, tau=None, *args, **kwargs):
         super(Lognormal, self).__init__(*args, **kwargs)
-        tau, sd = get_tau_sd(tau=tau, sd=sd)
 
-        self.mu = mu = tt.as_tensor_variable(mu)
-        self.tau = tau = tt.as_tensor_variable(tau)
-        self.sd = sd = tt.as_tensor_variable(sd)
+        self.mu = mu
+        self.tau, self.sd = get_tau_sd(tau=tau, sd=sd)
 
-        self.mean = tt.exp(self.mu + 1. / (2 * self.tau))
-        self.median = tt.exp(self.mu)
-        self.mode = tt.exp(self.mu - 1. / self.tau)
-        self.variance = (tt.exp(1. / self.tau) - 1) * tt.exp(2 * self.mu + 1. / self.tau)
-
-        assert_negative_support(tau, 'tau', 'Lognormal')
-        assert_negative_support(sd, 'sd', 'Lognormal')
+        self.mean = tt.exp(mu + 1. / (2 * self.tau))
+        self.median = tt.exp(mu)
+        self.mode = tt.exp(mu - 1. / self.tau)
+        self.variance = (tt.exp(1. / self.tau) - 1) * tt.exp(2 * mu + 1. / self.tau)
 
     def _random(self, mu, tau, size=None):
         samples = np.random.normal(size=size)
@@ -906,20 +605,10 @@ class Lognormal(PositiveContinuous):
                      - tt.log(value),
                      tau > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        tau = dist.tau
-        mu = dist.mu
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Lognormal}}(\mathit{{mu}}={},~\mathit{{tau}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(tau))
-
 
 class StudentT(Continuous):
     R"""
-    Student's T log-likelihood.
+    Non-central Student's T log-likelihood.
 
     Describes a normal variable whose precision is gamma distributed.
     If only nu parameter is passed, this specifies a standard (central)
@@ -932,64 +621,29 @@ class StudentT(Continuous):
            \left(\frac{\lambda}{\pi\nu}\right)^{\frac{1}{2}}
            \left[1+\frac{\lambda(x-\mu)^2}{\nu}\right]^{-\frac{\nu+1}{2}}
 
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-5.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, lam, df : st.t.pdf(x, df, loc=mu, scale=1.0/np.sqrt(lam))
-        plot_pdf = lambda mu, lam, df : ax.plot(x, f(mu, lam, df), label=r'$\mu$={0}, $\lambda$={1}, $\nu$={2}'.format(mu, lam, df))
-        plot_pdf(0.0, 1.0, 1.0)
-        plot_pdf(0.0, 1.0, 2.0)
-        plot_pdf(0.0, 1.0, 5)
-        plot_pdf(-1.0, 1.0, 5)
-        plot_pdf(-1.0, 2.0, 5)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-5,5], ylim=[0,0.6], xlabel='x', ylabel='f(x)')
-        plt.show()
-
     ========  ========================
     Support   :math:`x \in \mathbb{R}`
     ========  ========================
 
     Parameters
     ----------
-    nu : float
-        Degrees of freedom, also known as normality parameter (nu > 0).
+    nu : int
+        Degrees of freedom (nu > 0).
     mu : float
         Location parameter.
-    sd : float
-        Standard deviation (sd > 0) (only required if lam is not specified)
     lam : float
-        Precision (lam > 0) (only required if sd is not specified)
-        
-    Examples
-    --------
-    .. code-block:: python
-
-        with pm.Model():
-            x = pm.StudentT('x', nu=15, mu=0, sd=10)
-            
-        with pm.Model():
-            x = pm.StudentT('x', nu=15, mu=0, lam=1/23)
+        Scale parameter (lam > 0).
     """
 
     def __init__(self, nu, mu=0, lam=None, sd=None, *args, **kwargs):
         super(StudentT, self).__init__(*args, **kwargs)
         self.nu = nu = tt.as_tensor_variable(nu)
-        lam, sd = get_tau_sd(tau=lam, sd=sd)
-        self.lam = lam = tt.as_tensor_variable(lam)
-        self.sd = sd = tt.as_tensor_variable(sd)
-        self.mean = self.median = self.mode = self.mu = mu = tt.as_tensor_variable(mu)
+        self.lam, self.sd = get_tau_sd(tau=lam, sd=sd)
+        self.mean = self.median = self.mode = self.mu = mu
 
         self.variance = tt.switch((nu > 2) * 1,
                                   (1 / self.lam) * (nu / (nu - 2)),
                                   np.inf)
-
-        assert_negative_support(lam, 'lam (sd)', 'StudentT')
-        assert_negative_support(nu, 'nu', 'StudentT')
 
     def random(self, point=None, size=None, repeat=None):
         nu, mu, lam = draw_values([self.nu, self.mu, self.lam],
@@ -1010,18 +664,6 @@ class StudentT(Continuous):
                      - (nu + 1.0) / 2.0 * tt.log1p(lam * (value - mu)**2 / nu),
                      lam > 0, nu > 0, sd > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        nu = dist.nu
-        mu = dist.mu
-        lam = dist.lam
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{StudentT}}(\mathit{{nu}}={},~\mathit{{mu}}={},~\mathit{{lam}}={})$'.format(name,
-                                                                get_variable_name(nu),
-                                                                get_variable_name(mu),
-                                                                get_variable_name(lam))
-
 
 class Pareto(PositiveContinuous):
     R"""
@@ -1033,22 +675,6 @@ class Pareto(PositiveContinuous):
     .. math::
 
        f(x \mid \alpha, m) = \frac{\alpha m^{\alpha}}{x^{\alpha+1}}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda m, alpha : st.pareto.pdf(x, alpha, scale=m)
-        plot_pdf = lambda m, alpha : ax.plot(x, f(m, alpha), label=r'm={0}, $\alpha$={1}'.format(m, alpha))
-        plot_pdf(1.0,1.0)
-        plot_pdf(1.0,2.0)
-        plot_pdf(1.0,3.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,5], ylim=[0,3.0], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  =============================================================
     Support   :math:`x \in [m, \infty)`
@@ -1067,9 +693,8 @@ class Pareto(PositiveContinuous):
 
     def __init__(self, alpha, m, *args, **kwargs):
         super(Pareto, self).__init__(*args, **kwargs)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.m = m = tt.as_tensor_variable(m)
-
+        self.alpha = alpha
+        self.m = m
         self.mean = tt.switch(tt.gt(alpha, 1), alpha *
                               m / (alpha - 1.), np.inf)
         self.median = m * 2.**(1. / alpha)
@@ -1077,10 +702,6 @@ class Pareto(PositiveContinuous):
             tt.gt(alpha, 2),
             (alpha * m**2) / ((alpha - 2.) * (alpha - 1.)**2),
             np.inf)
-
-        assert_negative_support(alpha, 'alpha', 'Pareto')
-        assert_negative_support(m, 'm', 'Pareto')
-
 
     def _random(self, alpha, m, size=None):
         u = np.random.uniform(size=size)
@@ -1100,16 +721,6 @@ class Pareto(PositiveContinuous):
                      - logpow(value, alpha + 1),
                      value >= m, alpha > 0, m > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        alpha = dist.alpha
-        m = dist.m
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Pareto}}(\mathit{{alpha}}={},~\mathit{{m}}={})$'.format(name,
-                                                                get_variable_name(alpha),
-                                                                get_variable_name(m))
-
 
 class Cauchy(Continuous):
     R"""
@@ -1121,23 +732,6 @@ class Cauchy(Continuous):
 
        f(x \mid \alpha, \beta) =
            \frac{1}{\pi \beta [1 + (\frac{x-\alpha}{\beta})^2]}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-5.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda a, b : st.cauchy.pdf(x, loc=a, scale=b)
-        plot_pdf = lambda a, b : ax.plot(x, f(a, b), label=r'$\alpha$={0}, $\beta$={1}'.format(a, b))
-        plot_pdf(0.0, 0.5)
-        plot_pdf(0.0, 1.0)
-        plot_pdf(0.0, 2.0)
-        plot_pdf(-2.0, 1.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-5,5], ylim=[0,0.7], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ========================
     Support   :math:`x \in \mathbb{R}`
@@ -1156,10 +750,8 @@ class Cauchy(Continuous):
 
     def __init__(self, alpha, beta, *args, **kwargs):
         super(Cauchy, self).__init__(*args, **kwargs)
-        self.median = self.mode = self.alpha = tt.as_tensor_variable(alpha)
-        self.beta = tt.as_tensor_variable(beta)
-
-        assert_negative_support(beta, 'beta', 'Cauchy')
+        self.median = self.mode = self.alpha = alpha
+        self.beta = beta
 
     def _random(self, alpha, beta, size=None):
         u = np.random.uniform(size=size)
@@ -1179,16 +771,6 @@ class Cauchy(Continuous):
                      - tt.log1p(((value - alpha) / beta)**2),
                      beta > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        alpha = dist.alpha
-        beta = dist.beta
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Cauchy}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
-                                                                get_variable_name(alpha),
-                                                                get_variable_name(beta))
-
 
 class HalfCauchy(PositiveContinuous):
     R"""
@@ -1197,22 +779,6 @@ class HalfCauchy(PositiveContinuous):
     .. math::
 
        f(x \mid \beta) = \frac{2}{\pi \beta [1 + (\frac{x}{\beta})^2]}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda b : st.cauchy.pdf(x, scale=b)
-        plot_pdf = lambda b : ax.plot(x, f(b), label=r'$\beta$={0}'.format(b))
-        plot_pdf(0.5)
-        plot_pdf(1.0)
-        plot_pdf(2.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,5], ylim=[0,0.7], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ========================
     Support   :math:`x \in \mathbb{R}`
@@ -1229,18 +795,16 @@ class HalfCauchy(PositiveContinuous):
 
     def __init__(self, beta, *args, **kwargs):
         super(HalfCauchy, self).__init__(*args, **kwargs)
-        self.mode = tt.as_tensor_variable(0)
-        self.median = tt.as_tensor_variable(beta)
-        self.beta = tt.as_tensor_variable(beta)
-
-        assert_negative_support(beta, 'beta', 'HalfCauchy')
+        self.mode = 0
+        self.median = beta
+        self.beta = beta
 
     def _random(self, beta, size=None):
         u = np.random.uniform(size=size)
         return beta * np.abs(np.tan(np.pi * (u - 0.5)))
 
     def random(self, point=None, size=None, repeat=None):
-        beta = draw_values([self.beta], point=point)[0]
+        beta = draw_values([self.beta], point=point)
         return generate_samples(self._random, beta,
                                 dist_shape=self.shape,
                                 size=size)
@@ -1251,13 +815,6 @@ class HalfCauchy(PositiveContinuous):
                      - tt.log1p((value / beta)**2),
                      value >= 0, beta > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        beta = dist.beta
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{HalfCauchy}}(\mathit{{beta}}={})$'.format(name,
-                                                                get_variable_name(beta))
 
 class Gamma(PositiveContinuous):
     R"""
@@ -1270,23 +827,6 @@ class Gamma(PositiveContinuous):
 
        f(x \mid \alpha, \beta) =
            \frac{\beta^{\alpha}x^{\alpha-1}e^{-\beta x}}{\Gamma(\alpha)}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 20.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda a, b : st.gamma.pdf(x, a, scale=1.0/b)
-        plot_pdf = lambda a, b : ax.plot(x, f(a, b), label=r'$\alpha$={0}, $\beta$={1}'.format(a, b))
-        plot_pdf(1.0, 0.5)
-        plot_pdf(2.0, 0.5)
-        plot_pdf(3.0, 1.0)
-        plot_pdf(7.5, 1.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,20], ylim=[0,0.5], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ===============================
     Support   :math:`x \in (0, \infty)`
@@ -1319,14 +859,11 @@ class Gamma(PositiveContinuous):
                  *args, **kwargs):
         super(Gamma, self).__init__(*args, **kwargs)
         alpha, beta = self.get_alpha_beta(alpha, beta, mu, sd)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.beta = beta = tt.as_tensor_variable(beta)
+        self.alpha = alpha
+        self.beta = beta
         self.mean = alpha / beta
         self.mode = tt.maximum((alpha - 1) / beta, 0)
         self.variance = alpha / beta**2
-
-        assert_negative_support(alpha, 'alpha', 'Gamma')
-        assert_negative_support(beta, 'beta', 'Gamma')
 
     def get_alpha_beta(self, alpha=None, beta=None, mu=None, sd=None):
         if (alpha is not None) and (beta is not None):
@@ -1354,19 +891,10 @@ class Gamma(PositiveContinuous):
         return bound(
             -gammaln(alpha) + logpow(
                 beta, alpha) - beta * value + logpow(value, alpha - 1),
+
             value >= 0,
             alpha > 0,
             beta > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        beta = dist.beta
-        alpha = dist.alpha
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Gamma}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
-                                                                get_variable_name(alpha),
-                                                                get_variable_name(beta))
 
 
 class InverseGamma(PositiveContinuous):
@@ -1378,23 +906,6 @@ class InverseGamma(PositiveContinuous):
        f(x \mid \alpha, \beta) =
            \frac{\beta^{\alpha}}{\Gamma(\alpha)} x^{-\alpha - 1}
            \exp\left(\frac{-\beta}{x}\right)
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 3.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda alpha, beta : st.invgamma.pdf(x, alpha, scale=beta)
-        plot_pdf = lambda alpha, beta : ax.plot(x, f(alpha, beta), label=r'$\alpha$={0}, $\beta$={1}'.format(alpha, beta))
-        plot_pdf(1.0,1.0)
-        plot_pdf(2.0,1.0)
-        plot_pdf(3.0,1.0)
-        plot_pdf(3.0,0.5)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,3], ylim=[0,5], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ======================================================
     Support   :math:`x \in (0, \infty)`
@@ -1413,16 +924,13 @@ class InverseGamma(PositiveContinuous):
 
     def __init__(self, alpha, beta=1, *args, **kwargs):
         super(InverseGamma, self).__init__(*args, **kwargs)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.beta = beta = tt.as_tensor_variable(beta)
-
+        self.alpha = alpha
+        self.beta = beta
         self.mean = self._calculate_mean()
         self.mode = beta / (alpha + 1.)
         self.variance = tt.switch(tt.gt(alpha, 2),
                                   (beta**2) / (alpha * (alpha - 1.)**2),
                                   np.inf)
-        assert_negative_support(alpha, 'alpha', 'InverseGamma')
-        assert_negative_support(beta, 'beta', 'InverseGamma')
 
     def _calculate_mean(self):
         m = self.beta / (self.alpha - 1.)
@@ -1446,16 +954,6 @@ class InverseGamma(PositiveContinuous):
                      + logpow(value, -alpha - 1),
                      value > 0, alpha > 0, beta > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        beta = dist.beta
-        alpha = dist.alpha
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{InverseGamma}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
-                                                                get_variable_name(alpha),
-                                                                get_variable_name(beta))
-
 
 class ChiSquared(Gamma):
     R"""
@@ -1464,25 +962,6 @@ class ChiSquared(Gamma):
     .. math::
 
        f(x \mid \nu) = \frac{x^{(\nu-2)/2}e^{-x/2}}{2^{\nu/2}\Gamma(\nu/2)}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 8.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda df : st.chi2.pdf(x, df)
-        plot_pdf = lambda df : ax.plot(x, f(df), label=r'$\nu$={0}'.format(df))
-        plot_pdf(1.0)
-        plot_pdf(2.0)
-        plot_pdf(3.0)
-        plot_pdf(4.0)
-        plot_pdf(6.0)
-        plot_pdf(9.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,8], ylim=[0,0.5], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ===============================
     Support   :math:`x \in [0, \infty)`
@@ -1497,17 +976,9 @@ class ChiSquared(Gamma):
     """
 
     def __init__(self, nu, *args, **kwargs):
-        self.nu = nu = tt.as_tensor_variable(nu)
+        self.nu = nu
         super(ChiSquared, self).__init__(alpha=nu / 2., beta=0.5,
                                          *args, **kwargs)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        nu = dist.nu
-        name = r'\text{%s}' % name
-        return r'${} \sim \Chi^2(\mathit{{nu}}={})$'.format(name,
-                                                                get_variable_name(nu))
 
 
 class Weibull(PositiveContinuous):
@@ -1519,23 +990,6 @@ class Weibull(PositiveContinuous):
        f(x \mid \alpha, \beta) =
            \frac{\alpha x^{\alpha - 1}
            \exp(-(\frac{x}{\beta})^{\alpha})}{\beta^\alpha}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(0.0, 2.5, 1000)
-        fig, ax = plt.subplots()
-        f = lambda alpha, beta : st.weibull_min.pdf(x, alpha, scale=beta)
-        plot_pdf = lambda alpha, beta : ax.plot(x, f(alpha, beta), label=r'$\alpha$={0}, $\beta$={1}'.format(alpha, beta))
-        plot_pdf(0.5, 1.0)
-        plot_pdf(1.0, 1.0)
-        plot_pdf(1.5, 1.0)
-        plot_pdf(5.0, 1.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,2.5], ylim=[0,2.5], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ====================================================
     Support   :math:`x \in [0, \infty)`
@@ -1553,18 +1007,12 @@ class Weibull(PositiveContinuous):
 
     def __init__(self, alpha, beta, *args, **kwargs):
         super(Weibull, self).__init__(*args, **kwargs)
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-        self.beta = beta = tt.as_tensor_variable(beta)
+        self.alpha = alpha
+        self.beta = beta
         self.mean = beta * tt.exp(gammaln(1 + 1. / alpha))
         self.median = beta * tt.exp(gammaln(tt.log(2)))**(1. / alpha)
         self.variance = (beta**2) * \
             tt.exp(gammaln(1 + 2. / alpha - self.mean**2))
-        self.mode = tt.switch(alpha >= 1, 
-                              beta * ((alpha - 1)/alpha) ** (1 / alpha), 
-                              0)  # Reference: https://en.wikipedia.org/wiki/Weibull_distribution
-
-        assert_negative_support(alpha, 'alpha', 'Weibull')
-        assert_negative_support(beta, 'beta', 'Weibull')
 
     def random(self, point=None, size=None, repeat=None):
         alpha, beta = draw_values([self.alpha, self.beta],
@@ -1585,110 +1033,118 @@ class Weibull(PositiveContinuous):
                      - (value / beta)**alpha,
                      value >= 0, alpha > 0, beta > 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        beta = dist.beta
-        alpha = dist.alpha
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Weibull}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
-                                                                get_variable_name(alpha),
-                                                                get_variable_name(beta))
 
-
-class HalfStudentT(PositiveContinuous):
+class Bounded(Continuous):
     R"""
-    Half Student's T log-likelihood
-
-    .. math::
-
-        f(x \mid \sigma,\nu) =
-            \frac{2\;\Gamma\left(\frac{\nu+1}{2}\right)}
-            {\Gamma\left(\frac{\nu}{2}\right)\sqrt{\nu\pi\sigma^2}}
-            \left(1+\frac{1}{\nu}\frac{x^2}{\sigma^2}\right)^{-\frac{\nu+1}{2}}
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-5.0, 5.0, 200)
-        fig, ax = plt.subplots()
-        f = lambda sigma, nu : st.t.pdf(x, df=nu, loc=0, scale=sigma)
-        plot_pdf = lambda sigma, nu : ax.plot(x, f(sigma, nu), label=r'$\sigma$={}, $\nu$={}'.format(sigma, nu))
-        plot_pdf(1, 0.5)
-        plot_pdf(1, 1)
-        plot_pdf(2, 1)
-        plot_pdf(1, 30)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[0,5], ylim=[0, 0.4], xlabel='x', ylabel='f(x)')
-        plt.show()
-
-    ========  ========================
-    Support   :math:`x \in [0, \infty)`
-    ========  ========================
+    An upper, lower or upper+lower bounded distribution
 
     Parameters
     ----------
-    nu : float
-        Degrees of freedom, also known as normality parameter (nu > 0).
-    sd : float
-        Scale parameter (sd > 0). Converges to the standard deviation as nu
-        increases. (only required if lam is not specified)
-    lam : float
-        Scale parameter (lam > 0). Converges to the precision as nu
-        increases. (only required if sd is not specified)
-        
-    Examples
-    --------
-    .. code-block:: python
-
-        # Only pass in one of lam or sd, but not both.
-        with pm.Model():
-            x = pm.HalfStudentT('x', sd=10, nu=10)
-     
-        with pm.Model():
-            x = pm.HalfStudentT('x', lam=4, nu=10)
+    distribution : pymc3 distribution
+        Distribution to be transformed into a bounded distribution
+    lower : float (optional)
+        Lower bound of the distribution, set to -inf to disable.
+    upper : float (optional)
+        Upper bound of the distribibution, set to inf to disable.
+    tranform : 'infer' or object
+        If 'infer', infers the right transform to apply from the supplied bounds.
+        If transform object, has to supply .forward() and .backward() methods.
+        See pymc3.distributions.transforms for more information.
     """
-    def __init__(self, nu=1, sd=None, lam=None, *args, **kwargs):
-        super(HalfStudentT, self).__init__(*args, **kwargs)
-        self.mode = tt.as_tensor_variable(0)
-        lam, sd = get_tau_sd(lam, sd)
-        self.median = tt.as_tensor_variable(sd)
-        self.sd = tt.as_tensor_variable(sd)
-        self.lam = tt.as_tensor_variable(lam)
-        self.nu = nu = tt.as_tensor_variable(nu)
 
-        assert_negative_support(sd, 'sd', 'HalfStudentT')
-        assert_negative_support(lam, 'lam', 'HalfStudentT')
-        assert_negative_support(nu, 'nu', 'HalfStudentT')
+    def __init__(self, distribution, lower, upper, transform='infer', *args, **kwargs):
+        self.dist = distribution.dist(*args, **kwargs)
+
+        self.__dict__.update(self.dist.__dict__)
+        self.__dict__.update(locals())
+
+        if hasattr(self.dist, 'mode'):
+            self.mode = self.dist.mode
+
+        if transform == 'infer':
+
+            default = self.dist.default()
+
+            if not np.isinf(lower) and not np.isinf(upper):
+                self.transform = transforms.interval(lower, upper)
+                if default <= lower or default >= upper:
+                    self.testval = 0.5 * (upper + lower)
+
+            if not np.isinf(lower) and np.isinf(upper):
+                self.transform = transforms.lowerbound(lower)
+                if default <= lower:
+                    self.testval = lower + 1
+
+            if np.isinf(lower) and not np.isinf(upper):
+                self.transform = transforms.upperbound(upper)
+                if default >= upper:
+                    self.testval = upper - 1
+
+    def _random(self, lower, upper, point=None, size=None):
+        samples = np.zeros(size).flatten()
+        i, n = 0, len(samples)
+        while i < len(samples):
+            sample = self.dist.random(point=point, size=n)
+            select = sample[np.logical_and(sample > lower, sample <= upper)]
+            samples[i:(i + len(select))] = select[:]
+            i += len(select)
+            n -= len(select)
+        if size is not None:
+            return np.reshape(samples, size)
+        else:
+            return samples
 
     def random(self, point=None, size=None, repeat=None):
-        nu, sd = draw_values([self.nu, self.sd], point=point)
-        return np.abs(generate_samples(stats.t.rvs, nu, loc=0, scale=sd,
-                                       dist_shape=self.shape,
-                                       size=size))
+        lower, upper = draw_values([self.lower, self.upper], point=point)
+        return generate_samples(self._random, lower, upper, point,
+                                dist_shape=self.shape,
+                                size=size)
 
     def logp(self, value):
-        nu = self.nu
-        sd = self.sd
-        lam = self.lam
+        return bound(self.dist.logp(value),
+                     value >= self.lower, value <= self.upper)
 
-        return bound(tt.log(2) + gammaln((nu + 1.0) / 2.0)
-                     - gammaln(nu / 2.0)
-                     - .5 * tt.log(nu * np.pi * sd**2)
-                     - (nu + 1.0) / 2.0 * tt.log1p(value ** 2 / (nu * sd**2)),
-                     sd > 0, lam > 0, nu > 0, value >= 0)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        nu = dist.nu
-        sd = dist.sd
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{HalfStudentT}}(\mathit{{nu}}={},~\mathit{{sd}}={})$'.format(name,
-                                                                get_variable_name(nu),
-                                                                get_variable_name(sd))
+class Bound(object):
+    R"""
+    Creates a new upper, lower or upper+lower bounded distribution
+
+    Parameters
+    ----------
+    distribution : pymc3 distribution
+        Distribution to be transformed into a bounded distribution
+    lower : float (optional)
+        Lower bound of the distribution
+    upper : float (optional)
+
+    Example
+    -------
+    boundedNormal = pymc3.Bound(pymc3.Normal, lower=0.0)
+    par = boundedNormal(mu=0.0, sd=1.0, testval=1.0)
+    """
+
+    def __init__(self, distribution, lower=-np.inf, upper=np.inf):
+        self.distribution = distribution
+        self.lower = lower
+        self.upper = upper
+
+    def __call__(self, *args, **kwargs):
+        first, args = args[0], args[1:]
+
+        return Bounded(first, self.distribution, self.lower, self.upper,
+                       *args, **kwargs)
+
+    def dist(self, *args, **kwargs):
+        return Bounded.dist(self.distribution, self.lower, self.upper,
+                            *args, **kwargs)
+
+
+def StudentTpos(*args, **kwargs):
+    warnings.warn("StudentTpos has been deprecated. In future, use HalfStudentT instead.",
+                DeprecationWarning)
+    return HalfStudentT(*args, **kwargs)
+
+HalfStudentT = Bound(StudentT, lower=0)
 
 
 class ExGaussian(Continuous):
@@ -1707,23 +1163,6 @@ class ExGaussian(Continuous):
 
     where :math:`\Phi` is the cumulative distribution function of the
     standard normal distribution.
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-6.0, 6.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, sigma, nu : st.exponnorm.pdf(x, nu/sigma, loc=mu, scale=sigma)
-        plot_pdf = lambda mu, sigma, nu : ax.plot(x, f(mu, sigma, nu), label=r'$\mu$={0}, $\sigma$={1}, $\nu$={2}'.format(mu, sigma, nu))
-        plot_pdf(0.0,1.0,1.0)
-        plot_pdf(-2.0,1.0,1.0)
-        plot_pdf(0.0,3.0,1.0)
-        plot_pdf(-3.0,1.0,4.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-6,6], ylim=[0,0.4], xlabel='x', ylabel='f(x)')
-        plt.show()
 
     ========  ========================
     Support   :math:`x \in \mathbb{R}`
@@ -1755,14 +1194,11 @@ class ExGaussian(Continuous):
 
     def __init__(self, mu, sigma, nu, *args, **kwargs):
         super(ExGaussian, self).__init__(*args, **kwargs)
-        self.mu = mu = tt.as_tensor_variable(mu)
-        self.sigma = sigma = tt.as_tensor_variable(sigma)
-        self.nu = nu = tt.as_tensor_variable(nu)
+        self.mu = mu
+        self.sigma = sigma
+        self.nu = nu
         self.mean = mu + nu
         self.variance = (sigma**2) + (nu**2)
-
-        assert_negative_support(sigma, 'sigma', 'ExGaussian')
-        assert_negative_support(nu, 'nu', 'ExGaussian')
 
     def random(self, point=None, size=None, repeat=None):
         mu, sigma, nu = draw_values([self.mu, self.sigma, self.nu],
@@ -1789,53 +1225,21 @@ class ExGaussian(Continuous):
                        - 0.5 * ((value - mu) / sigma)**2)
         return bound(lp, sigma > 0., nu > 0.)
 
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        sigma = dist.sigma
-        mu = dist.mu
-        nu = dist.nu
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{ExGaussian}}(\mathit{{mu}}={},~\mathit{{sigma}}={},~\mathit{{nu}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(sigma),
-                                                                get_variable_name(nu))
-
 
 class VonMises(Continuous):
     R"""
     Univariate VonMises log-likelihood.
-
     .. math::
         f(x \mid \mu, \kappa) =
             \frac{e^{\kappa\cos(x-\mu)}}{2\pi I_0(\kappa)}
 
-    where :math:`I_0` is the modified Bessel function of order 0.
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-np.pi, np.pi, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, kappa : st.vonmises.pdf(x, kappa, loc=mu)
-        plot_pdf = lambda mu, kappa : ax.plot(x, f(mu, kappa), label=r'$\mu$={0}, $\kappa$={1}'.format(mu, kappa))
-        plot_pdf(0.0,0.001)
-        plot_pdf(0.0,0.5)
-        plot_pdf(0.0,1.0)
-        plot_pdf(0.0,2.0)
-        plot_pdf(0.0,4.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-np.pi,np.pi], ylim=[0,1.0], xlabel='x', ylabel='f(x)')
-        plt.show()
+    where :I_0 is the modified Bessel function of order 0.
 
     ========  ==========================================
     Support   :math:`x \in [-\pi, \pi]`
     Mean      :math:`\mu`
     Variance  :math:`1-\frac{I_1(\kappa)}{I_0(\kappa)}`
     ========  ==========================================
-
     Parameters
     ----------
     mu : float
@@ -1846,13 +1250,13 @@ class VonMises(Continuous):
 
     def __init__(self, mu=0.0, kappa=None, transform='circular',
                  *args, **kwargs):
-        if transform == 'circular':
-            transform = transforms.Circular()
-        super(VonMises, self).__init__(transform=transform, *args, **kwargs)
-        self.mean = self.median = self.mode = self.mu = mu = tt.as_tensor_variable(mu)
-        self.kappa = kappa = floatX(tt.as_tensor_variable(kappa))
+        super(VonMises, self).__init__(*args, **kwargs)
+        self.mean = self.median = self.mode = self.mu = mu
+        self.kappa = kappa
+        self.variance = 1 - i1(kappa) / i0(kappa)
 
-        assert_negative_support(kappa, 'kappa', 'VonMises')
+        if transform == 'circular':
+            self.transform = transforms.Circular()
 
     def random(self, point=None, size=None, repeat=None):
         mu, kappa = draw_values([self.mu, self.kappa],
@@ -1864,60 +1268,25 @@ class VonMises(Continuous):
     def logp(self, value):
         mu = self.mu
         kappa = self.kappa
-        return bound(kappa * tt.cos(mu - value) - (tt.log(2 * np.pi) + log_i0(kappa)),
-                     kappa > 0, value >= -np.pi, value <= np.pi)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        kappa = dist.kappa
-        mu = dist.mu
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{VonMises}}(\mathit{{mu}}={},~\mathit{{kappa}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(kappa))
-
+        return bound(kappa * tt.cos(mu - value) - tt.log(2 * np.pi * i0(kappa)), value >= -np.pi, value <= np.pi, kappa >= 0)
 
 
 class SkewNormal(Continuous):
     R"""
     Univariate skew-normal log-likelihood.
-
     .. math::
        f(x \mid \mu, \tau, \alpha) =
        2 \Phi((x-\mu)\sqrt{\tau}\alpha) \phi(x,\mu,\tau)
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-3.0, 3.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda alpha, mu, sigma : st.skewnorm.pdf(x, alpha, loc=mu, scale=sigma)
-        plot_pdf = lambda alpha, mu, sigma : ax.plot(x, f(alpha, mu, sigma), label=r'$\mu$={0}, $\sigma$={1}, $\alpha$={2}'.format(mu, sigma, alpha))
-        plot_pdf(-4.0,0.0,1.0)
-        plot_pdf(-1.0,0.0,1.0)
-        plot_pdf(0.0,0.0,1.0)
-        plot_pdf(1.0,0.0,1.0)
-        plot_pdf(4.0,0.0,1.0)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-3,3], ylim=[0,0.7], xlabel='x', ylabel='f(x)')
-        plt.show()
-
     ========  ==========================================
     Support   :math:`x \in \mathbb{R}`
     Mean      :math:`\mu + \sigma \sqrt{\frac{2}{\pi}} \frac {\alpha }{{\sqrt {1+\alpha ^{2}}}}`
     Variance  :math:`\sigma^2 \left(  1-\frac{2\alpha^2}{(\alpha^2+1) \pi} \right)`
     ========  ==========================================
-
     Skew-normal distribution can be parameterized either in terms of precision
     or standard deviation. The link between the two parametrizations is
     given by
-
     .. math::
        \tau = \dfrac{1}{\sigma^2}
-
     Parameters
     ----------
     mu : float
@@ -1938,21 +1307,14 @@ class SkewNormal(Continuous):
     """
     def __init__(self, mu=0.0, sd=None, tau=None, alpha=1,  *args, **kwargs):
         super(SkewNormal, self).__init__(*args, **kwargs)
-        tau, sd = get_tau_sd(tau=tau, sd=sd)
-        self.mu = mu = tt.as_tensor_variable(mu)
-        self.tau = tt.as_tensor_variable(tau)
-        self.sd = tt.as_tensor_variable(sd)
-
-        self.alpha = alpha = tt.as_tensor_variable(alpha)
-
+        self.mu = mu
+        self.tau, self.sd = get_tau_sd(tau=tau, sd=sd)
+        self.alpha = alpha
         self.mean = mu + self.sd * (2 / np.pi)**0.5 * alpha / (1 + alpha**2)**0.5
         self.variance = self.sd**2 * (1 - (2 * alpha**2) / ((1 + alpha**2) * np.pi))
 
-        assert_negative_support(tau, 'tau', 'SkewNormal')
-        assert_negative_support(sd, 'sd', 'SkewNormal')
-
     def random(self, point=None, size=None, repeat=None):
-        mu, tau, _, alpha = draw_values(
+        mu, tau, sd, alpha = draw_values(
             [self.mu, self.tau, self.sd, self.alpha], point=point)
         return generate_samples(stats.skewnorm.rvs,
                                 a=alpha, loc=mu, scale=tau**-0.5,
@@ -1970,275 +1332,3 @@ class SkewNormal(Continuous):
             + (-tau * (value - mu)**2
             + tt.log(tau / np.pi / 2.)) / 2.,
             tau > 0, sd > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        sd = dist.sd
-        mu = dist.mu
-        alpha = dist.alpha
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Skew-Normal}}(\mathit{{mu}}={},~\mathit{{sd}}={},~\mathit{{alpha}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(sd),
-                                                                get_variable_name(alpha))
-
-
-class Triangular(Continuous):
-    """
-    Continuous Triangular log-likelihood
-    Implemented by J. A. Fonseca 22/12/16
-
-    Parameters
-    ----------
-    lower : float
-        Lower limit.
-    c: float
-        mode
-    upper : float
-        Upper limit.
-    """
-
-    def __init__(self, lower=0, upper=1, c=0.5,
-                 *args, **kwargs):
-        super(Triangular, self).__init__(*args, **kwargs)
-
-        self.median = self.mean = self.c = c  = tt.as_tensor_variable(c)
-        self.lower = lower = tt.as_tensor_variable(lower)
-        self.upper = upper = tt.as_tensor_variable(upper)
-
-    def random(self, point=None, size=None):
-        c, lower, upper = draw_values([self.c, self.lower, self.upper],
-                                      point=point)
-        return generate_samples(stats.triang.rvs, c=c-lower, loc=lower, scale=upper-lower,
-                                size=size, dist_shape=self.shape, random_state=None)
-
-    def logp(self, value):
-        c = self.c
-        lower = self.lower
-        upper = self.upper
-        return tt.switch(alltrue_elemwise([lower <= value, value < c]),
-                         tt.log(2 * (value - lower) / ((upper - lower) * (c - lower))),
-                         tt.switch(tt.eq(value, c), tt.log(2 / (upper - lower)),
-                         tt.switch(alltrue_elemwise([c < value, value <= upper]),
-                         tt.log(2 * (upper - value) / ((upper - lower) * (upper - c))),np.inf)))
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        lower = dist.lower
-        upper = dist.upper
-        c = dist.c
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Triangular}}(\mathit{{c}}={},~\mathit{{lower}}={},~\mathit{{upper}}={})$'.format(name,
-                                                                get_variable_name(c),
-                                                                get_variable_name(lower),
-                                                                get_variable_name(upper))
-
-
-class Gumbel(Continuous):
-    R"""
-        Univariate Gumbel log-likelihood
-
-        .. math::
-           f(x \mid \mu, \beta) = -\frac{x - \mu}{\beta} - \exp \left(-\frac{x - \mu}{\beta} \right) - \log(\beta)
-        ========  ==========================================
-        Support   :math:`x \in \mathbb{R}`
-        Mean      :math:`\mu + \beta\gamma`, where \gamma is the Euler-Mascheroni constant
-        Variance  :math:`\frac{\pi^2}{6} \beta^2)`
-        ========  ==========================================
-
-        Parameters
-        ----------
-        mu : float
-            Location parameter.
-        beta : float
-            Scale parameter (beta > 0).
-        """
-
-    def __init__(self, mu=0, beta=1.0, **kwargs):
-        self.mu = tt.as_tensor_variable(mu)
-        self.beta = tt.as_tensor_variable(beta)
-
-        assert_negative_support(beta, 'beta', 'Gumbel')
-
-        self.mean = self.mu + self.beta * np.euler_gamma
-        self.median = self.mu - self.beta * tt.log(tt.log(2))
-        self.mode = self.mu
-        self.variance = (np.pi ** 2 / 6.0) * self.beta ** 2
-
-        super(Gumbel, self).__init__(**kwargs)
-
-    def random(self, point=None, size=None, repeat=None):
-        mu, sd = draw_values([self.mu, self.beta], point=point)
-        return generate_samples(stats.gumbel_r.rvs, loc=mu, scale=sd,
-                                dist_shape=self.shape,
-                                size=size)
-
-    def logp(self, value):
-        scaled = (value - self.mu) / self.beta
-        return bound(-scaled - tt.exp(-scaled) - tt.log(self.beta), self.beta > 0)
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        beta = dist.beta
-        mu = dist.mu
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Gumbel}}(\mathit{{mu}}={},~\mathit{{beta}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(beta))
-
-
-class Logistic(Continuous):
-    R"""
-    Logistic log-likelihood.
-
-    .. math::
-
-       f(x \mid \mu, s) =
-           \frac{\exp\left(-\frac{x - \mu}{s}\right)}{s \left(1 + \exp\left(-\frac{x - \mu}{s}\right)\right)^2}
-
-    ========  ==========================================
-    Support   :math:`x \in \mathbb{R}`
-    Mean      :math:`\mu`
-    Variance  :math:`\frac{s^2 \pi^2}{3}`
-    ========  ==========================================
-
-    .. plot::
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import scipy.stats as st
-        x = np.linspace(-5.0, 5.0, 1000)
-        fig, ax = plt.subplots()
-        f = lambda mu, s : st.logistic.pdf(x, loc=mu, scale=s)
-        plot_pdf = lambda a, b : ax.plot(x, f(a,b), label=r'$\mu$={0}, $s$={1}'.format(a,b))
-        plot_pdf(0.0, 0.4)
-        plot_pdf(0.0, 1.0)
-        plot_pdf(0.0, 2.0)
-        plot_pdf(-2.0, 0.4)
-        plt.legend(loc='upper right', frameon=False)
-        ax.set(xlim=[-5,5], ylim=[0,1.2], xlabel='x', ylabel='f(x)')
-        plt.show()
-
-    Parameters
-    ----------
-    mu : float
-        Mean.
-    s : float
-        Scale (s > 0).
-    """
-    def __init__(self, mu=0., s=1., *args, **kwargs):
-        super(Logistic, self).__init__(*args, **kwargs)
-
-        self.mu = tt.as_tensor_variable(mu)
-        self.s = tt.as_tensor_variable(s)
-
-        self.mean = self.mode = mu
-        self.variance = s**2 * np.pi**2 / 3.
-
-    def logp(self, value):
-        mu = self.mu
-        s = self.s
-
-        return bound(
-            -(value - mu) / s - tt.log(s) - 2 * tt.log1p(tt.exp(-(value - mu) / s)),
-            s > 0
-        )
-
-    def random(self, point=None, size=None, repeat=None):
-        mu, s = draw_values([self.mu, self.s], point=point)
-
-        return generate_samples(
-            stats.logistic.rvs,
-            loc=mu, scale=s,
-            dist_shape=self.shape,
-            size=size
-        )
-
-    def _repr_latex_(self, name=None, dist=None):
-        if dist is None:
-            dist = self
-        mu = dist.mu
-        s = dist.s
-        name = r'\text{%s}' % name
-        return r'${} \sim \text{{Logistic}}(\mathit{{mu}}={},~\mathit{{s}}={})$'.format(name,
-                                                                get_variable_name(mu),
-                                                                get_variable_name(s))
-
-
-class Interpolated(Continuous):
-    R"""
-    Univariate probability distribution defined as a linear interpolation
-    of probability density function evaluated on some lattice of points.
-
-    The lattice can be uneven, so the steps between different points can have
-    different size and it is possible to vary the precision between regions
-    of the support.
-
-    The probability density function values don not have to be normalized, as the
-    interpolated density is any way normalized to make the total probability
-    equal to $1$.
-
-    Both parameters `x_points` and values `pdf_points` are not variables, but
-    plain array-like objects, so they are constant and cannot be sampled.
-
-    ========  ===========================================
-    Support   :math:`x \in [x\_points[0], x\_points[-1]]`
-    ========  ===========================================
-
-    Parameters
-    ----------
-    x_points : array-like
-        A monotonically growing list of values
-    pdf_points : array-like
-        Probability density function evaluated on lattice `x_points`
-    """
-
-    def __init__(self, x_points, pdf_points, transform='interval',
-                 *args, **kwargs):
-        if transform == 'interval':
-            transform = transforms.interval(x_points[0], x_points[-1])
-        super(Interpolated, self).__init__(transform=transform,
-                                           *args, **kwargs)
-
-        interp = InterpolatedUnivariateSpline(x_points, pdf_points, k=1, ext='zeros')
-        Z = interp.integral(x_points[0], x_points[-1])
-
-        self.Z = tt.as_tensor_variable(Z)
-        self.interp_op = SplineWrapper(interp)
-        self.x_points = x_points
-        self.pdf_points = pdf_points / Z
-        self.cdf_points = interp.antiderivative()(x_points) / Z
-
-        self.median = self._argcdf(0.5)
-
-    def _argcdf(self, p):
-        pdf = self.pdf_points
-        cdf = self.cdf_points
-        x = self.x_points
-
-        index = np.searchsorted(cdf, p) - 1
-        slope = (pdf[index + 1] - pdf[index]) / (x[index + 1] - x[index])
-
-        return x[index] + np.where(
-            np.abs(slope) <= 1e-8,
-            np.where(
-                np.abs(pdf[index]) <= 1e-8,
-                np.zeros(index.shape),
-                (p - cdf[index]) / pdf[index]
-            ),
-            (-pdf[index] + np.sqrt(pdf[index] ** 2 + 2 * slope * (p - cdf[index]))) / slope
-        )
-
-    def _random(self, size=None):
-        return self._argcdf(np.random.uniform(size=size))
-
-    def random(self, point=None, size=None, repeat=None):
-        return generate_samples(self._random,
-                                dist_shape=self.shape,
-                                size=size)
-
-    def logp(self, value):
-        return tt.log(self.interp_op(value) / self.Z)

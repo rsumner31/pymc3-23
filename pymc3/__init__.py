@@ -1,12 +1,8 @@
-# pylint: disable=wildcard-import
-__version__ = "3.3"
+__version__ = "3.0.rc2"
 
 from .blocking import *
 from .distributions import *
-from .external import *
-from .glm import *
-from . import gp
-from .math import logaddexp, logsumexp, logit, invlogit, expand_packed_triangular, probit, invprobit
+from .math import logsumexp, logit, invlogit
 from .model import *
 from .stats import *
 from .sampling import *
@@ -15,15 +11,18 @@ from .theanof import *
 from .tuning import *
 from .variational import *
 from .vartypes import *
-from .exceptions import *
 from . import sampling
+
+from .debug import *
 
 from .diagnostics import *
 from .backends.tracetab import *
 
 from .plots import *
+
 from .tests import test
 
+from . import glm
 from .data import *
 
 import logging

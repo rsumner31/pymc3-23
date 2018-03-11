@@ -1,45 +1,37 @@
-import numbers
 import numpy as np
 import theano.tensor as tt
 from theano import function
-import theano
+
 from ..memoize import memoize
-from ..model import Model, get_named_nodes, FreeRV, ObservedRV
+from ..model import Model, get_named_nodes
 from ..vartypes import string_types
 
-__all__ = ['DensityDist', 'Distribution', 'Continuous', 'Discrete',
-           'NoDistribution', 'TensorType', 'draw_values']
 
-
-class _Unpickling(object):
-    pass
+__all__ = ['DensityDist', 'Distribution', 'Continuous',
+           'Discrete', 'NoDistribution', 'TensorType', 'draw_values']
 
 
 class Distribution(object):
     """Statistical distribution"""
     def __new__(cls, name, *args, **kwargs):
-        if name is _Unpickling:
-            return object.__new__(cls)  # for pickle
         try:
             model = Model.get_context()
         except TypeError:
             raise TypeError("No model on context stack, which is needed to "
-                            "instantiate distributions. Add variable inside "
-                            "a 'with model:' block, or use the '.dist' syntax "
-                            "for a standalone distribution.")
+                            "use the Normal('x', 0,1) syntax. "
+                            "Add a 'with model:' block")
 
         if isinstance(name, string_types):
             data = kwargs.pop('observed', None)
-            if isinstance(data, ObservedRV) or isinstance(data, FreeRV):
-                raise TypeError("observed needs to be data but got: {}".format(type(data)))
-            total_size = kwargs.pop('total_size', None)
             dist = cls.dist(*args, **kwargs)
-            return model.Var(name, dist, data, total_size)
+            return model.Var(name, dist, data)
+        elif name is None:
+            return object.__new__(cls)  # for pickle
         else:
-            raise TypeError("Name needs to be a string but got: {}".format(name))
+            raise TypeError("needed name or None but got: %s" % name)
 
     def __getnewargs__(self):
-        return _Unpickling,
+        return None,
 
     @classmethod
     def dist(cls, *args, **kwargs):
@@ -47,19 +39,18 @@ class Distribution(object):
         dist.__init__(*args, **kwargs)
         return dist
 
-    def __init__(self, shape, dtype, testval=None, defaults=(),
-                 transform=None, broadcastable=None):
+    def __init__(self, shape, dtype, testval=None, defaults=[], transform=None):
         self.shape = np.atleast_1d(shape)
         if False in (np.floor(self.shape) == self.shape):
             raise TypeError("Expected int elements in shape")
         self.dtype = dtype
-        self.type = TensorType(self.dtype, self.shape, broadcastable)
+        self.type = TensorType(self.dtype, self.shape)
         self.testval = testval
         self.defaults = defaults
         self.transform = transform
 
     def default(self):
-        return np.asarray(self.get_test_val(self.testval, self.defaults), self.dtype)
+        return self.get_test_val(self.testval, self.defaults)
 
     def get_test_val(self, val, defaults):
         if val is None:
@@ -70,10 +61,8 @@ class Distribution(object):
             return self.getattr_value(val)
 
         if val is None:
-            raise AttributeError("%s has no finite default value to use, "
-                                 "checked: %s. Pass testval argument or "
-                                 "adjust so value is finite."
-                                 % (self, str(defaults)))
+            raise AttributeError(str(self) + " has no finite default value to use, checked: " +
+                                 str(defaults) + " pass testval argument or adjust so value is finite.")
 
     def getattr_value(self, val):
         if isinstance(val, string_types):
@@ -82,62 +71,26 @@ class Distribution(object):
         if isinstance(val, tt.TensorVariable):
             return val.tag.test_value
 
-        if isinstance(val, tt.TensorConstant):
-            return val.value
-
         return val
 
-    def _repr_latex_(self, name=None, dist=None):
-        """Magic method name for IPython to use for LaTeX formatting."""
-        return None
 
-    def logp_nojac(self, *args, **kwargs):
-        """Return the logp, but do not include a jacobian term for transforms.
-
-        If we use different parametrizations for the same distribution, we
-        need to add the determinant of the jacobian of the transformation
-        to make sure the densities still describe the same distribution.
-        However, MAP estimates are not invariant with respect to the
-        parametrization, we need to exclude the jacobian terms in this case.
-
-        This function should be overwritten in base classes for transformed
-        distributions.
-        """
-        return self.logp(*args, **kwargs)
-
-    def logp_sum(self, *args, **kwargs):
-        """Return the sum of the logp values for the given observations.
-
-        Subclasses can use this to improve the speed of logp evaluations
-        if only the sum of the logp values is needed.
-        """
-        return tt.sum(self.logp(*args, **kwargs))
-
-    __latex__ = _repr_latex_
-
-
-def TensorType(dtype, shape, broadcastable=None):
-    if broadcastable is None:
-        broadcastable = np.atleast_1d(shape) == 1
-    return tt.TensorType(str(dtype), broadcastable)
+def TensorType(dtype, shape):
+    return tt.TensorType(str(dtype), np.atleast_1d(shape) == 1)
 
 
 class NoDistribution(Distribution):
 
-    def __init__(self, shape, dtype, testval=None, defaults=(),
-                 transform=None, parent_dist=None, *args, **kwargs):
+    def __init__(self, shape, dtype, testval=None, defaults=[], transform=None, parent_dist=None, *args, **kwargs):
         super(NoDistribution, self).__init__(shape=shape, dtype=dtype,
                                              testval=testval, defaults=defaults,
                                              *args, **kwargs)
         self.parent_dist = parent_dist
 
     def __getattr__(self, name):
-        # Do not use __getstate__ and __setstate__ from parent_dist
-        # to avoid infinite recursion during unpickling
-        if name.startswith('__'):
-            raise AttributeError(
-                "'NoDistribution' has no attribute '%s'" % name)
-        return getattr(self.parent_dist, name)
+        try:
+            self.__dict__[name]
+        except KeyError:
+            return getattr(self.parent_dist, name)
 
     def logp(self, x):
         return 0
@@ -146,20 +99,7 @@ class NoDistribution(Distribution):
 class Discrete(Distribution):
     """Base class for discrete distributions"""
 
-    def __init__(self, shape=(), dtype=None, defaults=('mode',),
-                 *args, **kwargs):
-        if dtype is None:
-            if theano.config.floatX == 'float32':
-                dtype = 'int16'
-            else:
-                dtype = 'int64'
-        if dtype != 'int16' and dtype != 'int64':
-            raise TypeError('Discrete classes expect dtype to be int16 or int64.')
-
-        if kwargs.get('transform', None) is not None:
-            raise ValueError("Transformations for discrete distributions "
-                             "are not allowed.")
-
+    def __init__(self, shape=(), dtype='int64', defaults=['mode'], *args, **kwargs):
         super(Discrete, self).__init__(
             shape, dtype, defaults=defaults, *args, **kwargs)
 
@@ -167,10 +107,7 @@ class Discrete(Distribution):
 class Continuous(Distribution):
     """Base class for continuous distributions"""
 
-    def __init__(self, shape=(), dtype=None, defaults=('median', 'mean', 'mode'),
-                 *args, **kwargs):
-        if dtype is None:
-            dtype = theano.config.floatX
+    def __init__(self, shape=(), dtype='float64', defaults=['median', 'mean', 'mode'], *args, **kwargs):
         super(Continuous, self).__init__(
             shape, dtype, defaults=defaults, *args, **kwargs)
 
@@ -178,21 +115,20 @@ class Continuous(Distribution):
 class DensityDist(Distribution):
     """Distribution based on a given log density function."""
 
-    def __init__(self, logp, shape=(), dtype=None, testval=0, random=None, *args, **kwargs):
-        if dtype is None:
-            dtype = theano.config.floatX
+    def __init__(self, logp, shape=(), dtype='float64', testval=0, *args, **kwargs):
         super(DensityDist, self).__init__(
             shape, dtype, testval, *args, **kwargs)
         self.logp = logp
-        self.rand = random
-    
-    def random(self, *args, **kwargs):
-        if self.rand is not None:
-            return self.rand(*args, **kwargs)
-        else:
-            raise ValueError("Distribution was not passed any random method "
-                            "Define a custom random method and pass it as kwarg random")
 
+
+class MultivariateContinuous(Continuous):
+
+    pass
+
+
+class MultivariateDiscrete(Discrete):
+
+    pass
 
 
 def draw_values(params, point=None):
@@ -222,13 +158,18 @@ def draw_values(params, point=None):
             if param.name in named_nodes:
                 named_nodes.pop(param.name)
             for name, node in named_nodes.items():
-                if not isinstance(node, (tt.sharedvar.SharedVariable,
+                if not isinstance(node, (tt.sharedvar.TensorSharedVariable,
                                          tt.TensorConstant)):
-                    givens[name] = (node, _draw_value(node, point=point))
-    values = []
-    for param in params:
-        values.append(_draw_value(param, point=point, givens=givens.values()))
-    return values
+                    givens[name] = (node, draw_value(node, point=point))
+    values = [None for _ in params]
+    for i, param in enumerate(params):
+        # "Homogonise" output
+        values[i] = np.atleast_1d(draw_value(
+            param, point=point, givens=givens.values()))
+    if len(values) == 1:
+        return values[0]
+    else:
+        return values
 
 
 @memoize
@@ -256,45 +197,40 @@ def _compile_theano_function(param, vars, givens=None):
                     allow_input_downcast=True)
 
 
-def _draw_value(param, point=None, givens=None):
-    """Draw a random value from a distribution or return a constant.
-
-    Parameters
-    ----------
-    param : number, array like, theano variable or pymc3 random variable
-        The value or distribution. Constants or shared variables
-        will be converted to an array and returned. Theano variables
-        are evaluated. If `param` is a pymc3 random variables, draw
-        a new value from it and return that, unless a value is specified
-        in `point`.
-    point : dict, optional
-        A dictionary from pymc3 variable names to their values.
-    givens : dict, optional
-        A dictionary from theano variables to their values. These values
-        are used to evaluate `param` if it is a theano variable.
-    """
-    if isinstance(param, numbers.Number):
-        return param
-    elif isinstance(param, np.ndarray):
-        return param
-    elif isinstance(param, tt.TensorConstant):
-        return param.value
-    elif isinstance(param, tt.sharedvar.SharedVariable):
-        return param.get_value()
-    elif isinstance(param, tt.TensorVariable):
-        if point and hasattr(param, 'model') and param.name in point:
-            return point[param.name]
-        elif hasattr(param, 'random') and param.random is not None:
-            return param.random(point=point, size=None)
-        else:
-            if givens:
-                variables, values = list(zip(*givens))
+def draw_value(param, point=None, givens=()):
+    if hasattr(param, 'name'):
+        if hasattr(param, 'model'):
+            if point is not None and param.name in point:
+                value = point[param.name]
+            elif hasattr(param, 'random') and param.random is not None:
+                value = param.random(point=point, size=None)
             else:
-                variables = values = []
-            func = _compile_theano_function(param, variables)
-            return func(*values)
+                value = param.tag.test_value
+        else:
+            input_pairs = ([g[0] for g in givens],
+                           [g[1] for g in givens])
+
+            value = _compile_theano_function(param,
+                                             input_pairs[0])(*input_pairs[1])
     else:
-        raise ValueError('Unexpected type in draw_value: %s' % type(param))
+        value = param
+
+    # Sanitising values may be necessary.
+    if hasattr(value, 'value'):
+        value = value.value
+    elif hasattr(value, 'get_value'):
+        value = value.get_value()
+
+    if hasattr(param, 'dtype'):
+        value = np.atleast_1d(value).astype(param.dtype)
+    if hasattr(param, 'shape'):
+        try:
+            shape = param.shape.tag.test_value
+        except:
+            shape = param.shape
+        if len(shape) == 0 and len(value) == 1:
+            value = value[0]
+    return value
 
 
 def broadcast_shapes(*args):
@@ -320,26 +256,6 @@ def broadcast_shapes(*args):
         if not all(x):
             return None
     return tuple(x)
-
-
-def infer_shape(shape):
-    try:
-        shape = tuple(shape or ())
-    except TypeError:  # If size is an int
-        shape = tuple((shape,))
-    except ValueError:  # If size is np.array
-        shape = tuple(shape)
-    return shape
-
-
-def reshape_sampled(sampled, size, dist_shape):
-    dist_shape = infer_shape(dist_shape)
-    repeat_shape = infer_shape(size)
-
-    if np.size(sampled) == 1 or repeat_shape or dist_shape:
-        return np.reshape(sampled, repeat_shape + dist_shape)
-    else:
-        return sampled
 
 
 def replicate_samples(generator, size, repeats, *args, **kwargs):
@@ -403,7 +319,10 @@ def generate_samples(generator, *args, **kwargs):
     else:
         prefix_shape = tuple(dist_shape)
 
-    repeat_shape = infer_shape(size)
+    try:
+        repeat_shape = tuple(size or ())
+    except TypeError:  # If size is an int
+        repeat_shape = tuple((size,))
 
     if broadcast_shape == (1,) and prefix_shape == ():
         if size is not None:
@@ -416,9 +335,13 @@ def generate_samples(generator, *args, **kwargs):
                                         broadcast_shape,
                                         repeat_shape + prefix_shape,
                                         *args, **kwargs)
+            if broadcast_shape == (1,) and not prefix_shape == ():
+                samples = np.reshape(samples, repeat_shape + prefix_shape)
         else:
             samples = replicate_samples(generator,
                                         broadcast_shape,
                                         prefix_shape,
                                         *args, **kwargs)
-    return reshape_sampled(samples, size, dist_shape)
+            if broadcast_shape == (1,):
+                samples = np.reshape(samples, prefix_shape)
+    return samples
