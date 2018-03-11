@@ -12,10 +12,6 @@ import numpy as np
 
 __all__ = ['HamiltonianMC']
 
-# TODO:
-# add constraint handling via page 37 of Radford's
-# http://www.cs.utoronto.ca/~radford/ham-mcmc.abstract.html
-
 
 def unif(step_size, elow=.85, ehigh=1.15):
     return np.random.uniform(elow, ehigh) * step_size
@@ -48,13 +44,30 @@ class HamiltonianMC(BaseHMC):
             An object that represents the Hamiltonian with methods `velocity`,
             `energy`, and `random` methods. It can be specified instead
             of the scaling matrix.
+        target_accept : float, default .8
+            Adapt the step size such that the average acceptance
+            probability across the trajectories are close to target_accept.
+            Higher values for target_accept lead to smaller step sizes.
+            Setting this to higher values like 0.9 or 0.99 can help
+            with sampling from difficult posteriors. Valid values are
+            between 0 and 1 (exclusive).
+        gamma : float, default .05
+        k : float, default .75
+            Parameter for dual averaging for step size adaptation. Values
+            between 0.5 and 1 (exclusive) are admissible. Higher values
+            correspond to slower adaptation.
+        t0 : int, default 10
+            Parameter for dual averaging. Higher values slow initial
+            adaptation.
+        adapt_step_size : bool, default=True
+            Whether step size adaptation should be enabled. If this is
+            disabled, `k`, `t0`, `gamma` and `target_accept` are ignored.
         model : pymc3.Model
             The model
         **kwargs : passed to BaseHMC
         """
         super(HamiltonianMC, self).__init__(vars, **kwargs)
         self.path_length = path_length
-        self.step_rand = step_rand
 
     def astep(self, q0):
         e = floatX(self.step_rand(self.step_size))

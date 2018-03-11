@@ -1,9 +1,11 @@
+from __future__ import division
+
 from collections import namedtuple
-import warnings
 
 from ..arraystep import Competence
-from pymc3.exceptions import SamplingError
-from .base_hmc import BaseHMC
+from .base_hmc import BaseHMC, HMCStepData, DivergenceInfo
+from .integration import IntegrationError
+from pymc3.backends.report import SamplerWarning, WarningType
 from pymc3.theanof import floatX
 from pymc3.vartypes import continuous_types
 
@@ -67,8 +69,8 @@ class NUTS(BaseHMC):
 
     References
     ----------
-    .. [1] Hoffman, Matthew D., & Gelman, Andrew. (2011). The No-U-Turn Sampler:
-       Adaptively Setting Path Lengths in Hamiltonian Monte Carlo.
+    .. [1] Hoffman, Matthew D., & Gelman, Andrew. (2011). The No-U-Turn
+       Sampler: Adaptively Setting Path Lengths in Hamiltonian Monte Carlo.
     """
     name = 'nuts'
 
@@ -97,19 +99,25 @@ class NUTS(BaseHMC):
         Emax : float, default 1000
             Maximum energy change allowed during leapfrog steps. Larger
             deviations will abort the integration.
-        target_accept : float (0,1), default .8
-            Try to find a step size such that the average acceptance
+        target_accept : float, default .8
+            Adapt the step size such that the average acceptance
             probability across the trajectories are close to target_accept.
             Higher values for target_accept lead to smaller step sizes.
+            Setting this to higher values like 0.9 or 0.99 can help
+            with sampling from difficult posteriors. Valid values are
+            between 0 and 1 (exclusive).
         step_scale : float, default 0.25
             Size of steps to take, automatically scaled down by `1/n**(1/4)`.
             If step size adaptation is switched off, the resulting step size
             is used. If adaptation is enabled, it is used as initial guess.
         gamma : float, default .05
-        k : float (.5,1) default .75
-            scaling of speed of adaptation
+        k : float, default .75
+            Parameter for dual averaging for step size adaptation. Values
+            between 0.5 and 1 (exclusive) are admissible. Higher values
+            correspond to slower adaptation.
         t0 : int, default 10
-            slows initial adaptation
+            Parameter for dual averaging. Higher values slow initial
+            adaptation.
         adapt_step_size : bool, default=True
             Whether step size adaptation should be enabled. If this is
             disabled, `k`, `t0`, `gamma` and `target_accept` are ignored.
@@ -126,12 +134,6 @@ class NUTS(BaseHMC):
             this will be interpreded as the mass or covariance matrix.
         is_cov : bool, default=False
             Treat the scaling as mass or covariance matrix.
-        on_error : {'summary', 'warn', 'raise'}, default='summary'
-            How to report problems during sampling.
-
-            * `summary`: Print one warning after sampling.
-            * `warn`: Print individual warnings as soon as they appear.
-            * `raise`: Raise an error on the first problem.
         potential : Potential, optional
             An object that represents the Hamiltonian with methods `velocity`,
             `energy`, and `random` methods. It can be specified instead
@@ -150,17 +152,6 @@ class NUTS(BaseHMC):
 
         self.Emax = Emax
 
-        self.target_accept = target_accept
-        self.gamma = gamma
-        self.k = k
-        self.t0 = t0
-
-        self.h_bar = 0
-        self.mu = np.log(self.step_size * 10)
-        self.log_step_size = np.log(self.step_size)
-        self.log_step_size_bar = 0
-        self.m = 1
-        self.adapt_step_size = adapt_step_size
         self.max_treedepth = max_treedepth
 
         self.tune = True
@@ -193,6 +184,8 @@ class NUTS(BaseHMC):
                 if diverging:
                     self.report._add_divergence(self.tune, *diverging)
                 break
+        else:
+            self._reached_max_treedepth += 1
 
         w = 1. / (self.m + self.t0)
         self.h_bar = ((1 - w) * self.h_bar +
@@ -221,6 +214,17 @@ class NUTS(BaseHMC):
         if var.dtype in continuous_types:
             return Competence.IDEAL
         return Competence.INCOMPATIBLE
+
+    def warnings(self, strace):
+        warnings = super(NUTS, self).warnings(strace)
+
+        if np.mean(self._reached_max_treedepth) > 0.05:
+            msg = ('The chain reached the maximum tree depth. Increase '
+                   'max_treedepth, increase target_accept or reparameterize.')
+            warn = SamplerWarning(WarningType.TREEDEPTH, msg, 'warn',
+                                  None, None, None)
+            warnings.append(warn)
+        return warnings
 
 
 # A node in the NUTS tree that is at the far right or left of the tree
@@ -315,14 +319,6 @@ class _Tree(object):
         except linalg.LinAlgError as err:
             error_msg = "LinAlgError during leapfrog step."
             error = err
-        except ValueError as err:
-            # Raised by many scipy.linalg functions
-            scipy_msg = "array must not contain infs or nans"
-            if len(err.args) > 0 and scipy_msg in err.args[0].lower():
-                error_msg = "Infs or nans in scipy.linalg during leapfrog step."
-                error = err
-            else:
-                raise
         else:
             right = Edge(*right)
             energy_change = right.energy - self.start_energy
@@ -338,21 +334,24 @@ class _Tree(object):
                 tree = Subtree(right, right, right.p, proposal, log_size, p_accept, 1)
                 return tree, False, False
             else:
-                error_msg = ("Energy change in leapfrog step is too large: %s. "
+                error_msg = ("Energy change in leapfrog step is too large: %s."
                              % energy_change)
                 error = None
         tree = Subtree(None, None, None, None, -np.inf, 0, 1)
-        return tree, (error_msg, error, left), False
+        divergance_info = DivergenceInfo(error_msg, error, left)
+        return tree, divergance_info, False
 
     def _build_subtree(self, left, depth, epsilon):
         if depth == 0:
             return self._single_step(left, epsilon)
 
-        tree1, diverging, turning = self._build_subtree(left, depth - 1, epsilon)
+        tree1, diverging, turning = self._build_subtree(
+            left, depth - 1, epsilon)
         if diverging or turning:
             return tree1, diverging, turning
 
-        tree2, diverging, turning = self._build_subtree(tree1.right, depth - 1, epsilon)
+        tree2, diverging, turning = self._build_subtree(
+            tree1.right, depth - 1, epsilon)
 
         left, right = tree1.left, tree2.right
 
@@ -373,7 +372,8 @@ class _Tree(object):
         accept_sum = tree1.accept_sum + tree2.accept_sum
         n_proposals = tree1.n_proposals + tree2.n_proposals
 
-        tree = Subtree(left, right, p_sum, proposal, log_size, accept_sum, n_proposals)
+        tree = Subtree(left, right, p_sum, proposal,
+                       log_size, accept_sum, n_proposals)
         return tree, diverging, turning
 
     def stats(self):

@@ -1,5 +1,6 @@
 from collections import defaultdict
 
+from six import integer_types
 from joblib import Parallel, delayed
 from numpy.random import randint, seed
 import numpy as np
@@ -7,7 +8,7 @@ import numpy as np
 import pymc3 as pm
 from .backends.base import merge_traces, BaseTrace, MultiTrace
 from .backends.ndarray import NDArray
-from .model import modelcontext, Point
+from .model import modelcontext, Point, all_continuous
 from .step_methods import (NUTS, HamiltonianMC, Metropolis, BinaryMetropolis,
                            BinaryGibbsMetropolis, CategoricalGibbsMetropolis,
                            Slice, CompoundStep)
@@ -190,6 +191,9 @@ def sample(draws=500, step=None, init='auto', n_init=200000, start=None,
         Options for traceplot. Example: live_plot_kwargs={'varnames': ['x']}
     discard_tuned_samples : bool
         Whether to discard posterior samples of the tune interval.
+    compute_convergence_checks : bool, default=True
+        Whether to compute sampler statistics like gelman-rubin and
+        effective_n.
 
     Returns
     -------
@@ -354,7 +358,7 @@ def _iter_sample(draws, step, start=None, trace=None, chain=0, tune=None,
     if random_seed != -1:
         seed(random_seed)
     if draws < 1:
-        raise ValueError('Argument `draws` should be above 0.')
+        raise ValueError('Argument `draws` must be greater than 0.')
 
     if start is None:
         start = {}
@@ -379,6 +383,7 @@ def _iter_sample(draws, step, start=None, trace=None, chain=0, tune=None,
         strace.setup(draws, chain)
 
     try:
+        step.tune = bool(tune)
         for i in range(draws):
             if i == tune:
                 step = stop_tuning(step)
@@ -394,16 +399,18 @@ def _iter_sample(draws, step, start=None, trace=None, chain=0, tune=None,
             yield strace
     except KeyboardInterrupt:
         strace.close()
-        if hasattr(step, 'report'):
-            step.report._finalize(strace)
+        if hasattr(step, 'warnings'):
+            warns = step.warnings(strace)
+            strace._add_warnings(warns)
         raise
     except BaseException:
         strace.close()
         raise
     else:
         strace.close()
-        if hasattr(step, 'report'):
-            step.report._finalize(strace)
+        if hasattr(step, 'warnings'):
+            warns = step.warnings(strace)
+            strace._add_warnings(warns)
 
 
 def _choose_backend(trace, chain, shortcuts=None, **kwds):
@@ -632,7 +639,8 @@ def init_nuts(init='ADVI', njobs=1, n_init=500000, model=None,
         if njobs == 1:
             start = start[0]
     else:
-        raise NotImplementedError('Initializer {} is not supported.'.format(init))
+        raise ValueError(
+            'Unknown initializer: {}.'.format(init))
 
     step = pm.NUTS(scaling=cov, is_cov=True, **kwargs)
 

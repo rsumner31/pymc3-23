@@ -8,7 +8,7 @@ import theano.sparse as sparse
 from theano import theano, tensor as tt
 from theano.tensor.var import TensorVariable
 
-from pymc3.theanof import set_theano_conf
+from pymc3.theanof import set_theano_conf, floatX
 import pymc3 as pm
 from pymc3.math import flatten_list
 from .memoize import memoize

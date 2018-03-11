@@ -49,6 +49,10 @@ class BaseTrace(object):
         self.chain = None
         self._is_base_setup = False
         self.sampler_vars = None
+        self._warnings = []
+
+    def _add_warnings(self, warnings):
+        self._warnings.extend(warnings)
 
     # Sampling methods
 
@@ -163,7 +167,7 @@ class BaseTrace(object):
             return self._get_sampler_stats(varname, sampler_idx, burn, thin)
 
         sampler_idxs = [i for i, s in enumerate(self.sampler_vars)
-                       if varname in s]
+                        if varname in s]
         if not sampler_idxs:
             raise KeyError("Unknown sampler stat %s" % varname)
 
@@ -174,20 +178,19 @@ class BaseTrace(object):
         else:
             return vals
 
-
     def _get_sampler_stats(self, varname, sampler_idx, burn, thin):
         """Get sampler statistics."""
         raise NotImplementedError()
 
     def _slice(self, idx):
         """Slice trace object."""
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def point(self, idx):
         """Return dictionary of point values at `idx` for current chain
         with variables names as keys.
         """
-        raise NotImplementedError
+        raise NotImplementedError()
 
     @property
     def stat_names(self):
@@ -247,6 +250,11 @@ class MultiTrace(object):
                 raise ValueError("Chains are not unique.")
             self._straces[strace.chain] = strace
 
+        self._report = SamplerReport()
+        for strace in straces:
+            if hasattr(strace, '_warnings'):
+                self._report._add_warnings(strace._warnings, strace.chain)
+
     def __repr__(self):
         template = '<{}: {} chains, {} iterations, {} variables>'
         return template.format(self.__class__.__name__,
@@ -259,6 +267,10 @@ class MultiTrace(object):
     @property
     def chains(self):
         return list(sorted(self._straces.keys()))
+
+    @property
+    def report(self):
+        return self._report
 
     def __getitem__(self, idx):
         if isinstance(idx, slice):
@@ -292,7 +304,7 @@ class MultiTrace(object):
         raise KeyError("Unknown variable %s" % var)
 
     _attrs = set(['_straces', 'varnames', 'chains', 'stat_names',
-                  'supports_sampler_stats'])
+                  'supports_sampler_stats', '_report'])
 
     def __getattr__(self, name):
         # Avoid infinite recursion when called before __init__
@@ -403,10 +415,13 @@ class MultiTrace(object):
                    for chain in chains]
         return _squeeze_cat(results, combine, squeeze)
 
-    def _slice(self, idx):
-        """Return a new MultiTrace object sliced according to `idx`."""
-        new_traces = [trace._slice(idx) for trace in self._straces.values()]
-        return MultiTrace(new_traces)
+    def _slice(self, slice):
+        """Return a new MultiTrace object sliced according to `slice`."""
+        new_traces = [trace._slice(slice) for trace in self._straces.values()]
+        trace = MultiTrace(new_traces)
+        idxs = slice.indices(len(self))
+        trace._report = self._report._slice(*idxs)
+        return trace
 
     def point(self, idx, chain=None):
         """Return a dictionary of point values at `idx`.
@@ -444,6 +459,7 @@ def merge_traces(mtraces):
             if new_chain in base_mtrace._straces:
                 raise ValueError("Chains are not unique.")
             base_mtrace._straces[new_chain] = strace
+    base_mtrace.report = merge_reports([trace.report for trace in mtraces])
     return base_mtrace
 
 

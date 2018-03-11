@@ -12,7 +12,6 @@ from .util import get_default_varnames
 from scipy.misc import logsumexp
 from scipy.stats.distributions import pareto
 
-from .backends import tracetab as ttab
 
 __all__ = ['autocorr', 'autocov', 'dic', 'bpic', 'waic', 'loo', 'hpd', 'quantiles',
            'mc_error', 'summary', 'df_summary', 'compare']

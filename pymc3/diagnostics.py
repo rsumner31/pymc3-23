@@ -233,8 +233,8 @@ def effective_n(mtrace):
         if t % 2:
             t -= 1
 
-        return min(num_chains * num_samples,
-                   int(num_chains * num_samples / (1. + 2 * rho[1:t-1].sum())))
+        neff = num_chains * num_samples / (1. + 2 * rho[1:t-1].sum())
+        return min(num_chains * num_samples, np.floor(neff))
 
     n_eff = {}
     for var in mtrace.varnames:
