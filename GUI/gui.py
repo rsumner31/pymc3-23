@@ -35,6 +35,17 @@ def progress_timeout(self):
     return True
 
 
+def progress_timeout(self):
+    # Calculate the value of the progress bar 
+    new_val = (self.model._current_iter+1.)/self.model._iter
+    print self.model._current_iter, self.model._iter
+    if new_val >= 1.0:
+        return False
+    # Set the new value
+    self.pbar.set_fraction(new_val)
+    # As this is a timeout function, return TRUE so that it
+    # continues to get called
+    return True
 
 class GladeWidget:
     def __init__(self, glade_file, widget_name):
