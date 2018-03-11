@@ -149,6 +149,7 @@ class GladeWidget:
             self.timer = Thread(target=gobject.timeout_add, args= (100, progress_timeout, self))
             self.timer.start()
 
+    
 if __name__ == "__main__":
     hwg = GladeWidget('gui.glade', 'window1')
     gtk.gdk.threads_init()
