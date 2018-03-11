@@ -115,6 +115,9 @@ class test_Gibbs(NumpyTestCase):
         assert(abs(mean(p_values)-alpha_real/(alpha_real + beta_real))<.01)
         assert(abs(var(p_values) - (alpha_real*beta_real) / (alpha_real + beta_real)**2 / (alpha_real + beta_real + 1)) < .001)
 
+        assert(abs(mean(p_values)-alpha_real/(alpha_real + beta_real))<.01)
+        # assert(abs(var(p_values)) - alpha_real/beta_real**2<.01)
+    
     def check_GammaNormal(self):
         tau = Gamma('tau', value=3., alpha=1., beta=1.)
 
@@ -235,4 +238,19 @@ class test_Gibbs(NumpyTestCase):
 
 if __name__ == '__main__':
     NumpyTest().run()
+
+# def check_VecBetaBinomial(self):
+#     p = Beta('p',.2*ones(5),alpha=1.,beta=1.)
+#     d = Binomial('d1', randint(0,16,5), n=15, p=p)
+#     p_stepper = VecBetaBinomial(p,d=d,n=15*ones(5),alpha=2,beta=1)
+# 
+#     p_values = zeros((5,10000))
+#     for i in xrange(10000):
+#         p_stepper.step()
+#         p_values[:,i] = p.value
+# 
+#     a_real = d.value + 2.
+#     b_real = 15-d.value + 1.
+#     assert((abs(mean(p_values, axis=1) - a_real / (a_real + b_real))<.01).all())
+#     assert((abs(var(p_values, axis=1) - (a_real*b_real) / (a_real + b_real)**2 / (a_real + b_real + 1))<.01).all())
 
