@@ -1,5 +1,5 @@
 #-------------------------------------------------------------------
-# Decorate fortran functions from PyMC.flib to ease argument passing
+# Decorate fortran functions from pymc.flib to ease argument passing
 #-------------------------------------------------------------------
 # TODO: Deal with functions that take correlation matrices as arguments.wishart, normal,?
 # TODO: test and finalize vectorized multivariate normal like.
