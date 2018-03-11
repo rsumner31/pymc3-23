@@ -15,6 +15,8 @@ __all__ = ['quad_potential', 'ElemWiseQuadPotential', 'QuadPotential',
 
 def quad_potential(C, is_cov, as_cov):
     """
+    Compute a QuadPotential object from a scaling matrix.
+
     Parameters
     ----------
     C : arraylike, 0 <= ndim <= 2
@@ -36,7 +38,7 @@ def quad_potential(C, is_cov, as_cov):
         if is_cov != as_cov:
             return QuadPotential_Sparse(C)
         else:
-            raise ValueError("Sparse precission matrices are not supported")
+            raise ValueError("Sparse precision matrices are not supported")
 
     partial_check_positive_definite(C)
     if C.ndim == 1:
@@ -52,7 +54,7 @@ def quad_potential(C, is_cov, as_cov):
 
 
 def partial_check_positive_definite(C):
-    """Simple but partial check for Positive Definiteness"""
+    """Make a simple but partial check for Positive Definiteness."""
     if C.ndim == 1:
         d = C
     else:
@@ -92,6 +94,7 @@ class ElemWiseQuadPotential(object):
         return self.v * x
 
     def random(self):
+        """Draw random value from QuadPotential."""
         return floatX(normal(size=self.s.shape)) * self.inv_s
 
     def energy(self, x):
@@ -109,6 +112,7 @@ class QuadPotential_Inv(object):
         return solve(self.L.T, y)
 
     def random(self):
+        """Draw random value from QuadPotential."""
         n = floatX(normal(size=self.L.shape[0]))
         return dot(self.L, n)
 
@@ -127,6 +131,7 @@ class QuadPotential(object):
         return tt.dot(self.A, x)
 
     def random(self):
+        """Draw random value from QuadPotential."""
         n = floatX(normal(size=self.L.shape[0]))
         return scipy.linalg.solve_triangular(self.L.T, n)
 
@@ -149,16 +154,25 @@ if chol_available:
 
     class QuadPotential_Sparse(object):
         def __init__(self, A):
+            """Compute a sparse cholesky decomposition of the potential.
+
+            Parameters
+            ----------
+            A : matrix, ndim = 2
+                scaling matrix for the potential vector
+            """
             self.A = A
             self.size = A.shape[0]
             self.factor = factor = cholmod.cholesky(A)
             self.d_sqrt = np.sqrt(factor.D())
 
         def velocity(self, x):
+            """Compute the current velocity at a position in parameter space."""
             A = theano.sparse.as_sparse(self.A)
             return theano.sparse.dot(A, x)
 
         def random(self):
+            """Draw random value from QuadPotential."""
             n = floatX(normal(size=self.size))
             n /= self.d_sqrt
             n = self.factor.solve_Lt(n)
@@ -166,4 +180,5 @@ if chol_available:
             return n
 
         def energy(self, x):
+            """Compute kinetic energy at a position in parameter space."""
             return 0.5 * x.T.dot(self.velocity(x))
