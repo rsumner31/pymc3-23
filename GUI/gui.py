@@ -37,12 +37,18 @@ def progress_timeout(self):
 
 def progress_timeout(self):
     # Calculate the value of the progress bar 
-    new_val = (self.model._current_iter+1.)/self.model._iter
-    print self.model._current_iter, self.model._iter
-    if new_val >= 1.0:
-        return False
-    # Set the new value
-    self.pbar.set_fraction(new_val)
+    if self.model.sampling:
+        i = min(max(self.model._current_iter,0), self.model._iter)
+        self.pbar.set_fraction(i/(self.model._iter))    
+    else:
+        if self.model._current_iter < 0 : # Sampling is over 
+            self.pbar.set_fraction(0.)
+            self.button2.set_label('Start')
+            self.button2.set_image(gtk.image_new_from_stock('gtk-yes', gtk.ICON_SIZE_BUTTON))
+            return False
+        
+        else:    # Sampling is interrupted.
+            return False
     # As this is a timeout function, return TRUE so that it
     # continues to get called
     return True
