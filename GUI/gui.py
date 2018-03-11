@@ -53,6 +53,8 @@ def progress_timeout(self):
     # continues to get called
     return True
 
+
+
 class GladeWidget:
     def __init__(self, glade_file, widget_name):
         """Connects signal handling methods to Glade widgets.
