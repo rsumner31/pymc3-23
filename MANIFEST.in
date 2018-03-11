@@ -1,1 +1,6 @@
-include README.txt INSTALL.txt LICENSE docs/UserGuide.pdf
+recursive-include pymc3/examples/data *
+recursive-include source *
+recursive-include docs *
+include requirements.txt
+include *.md *.rst
+include scripts/*.sh
